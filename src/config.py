@@ -2,6 +2,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 import pyrallis
 import torch
@@ -74,6 +75,9 @@ class DataConfig:
 
     # Loaders to use. Always includes the R splits.
     log_loaders: tuple[str] = ('piezo',)
+
+    # If training using data split from a test set, controls the seed.
+    test_split_seed: int = 3141
 
 
 @dataclass
@@ -154,6 +158,9 @@ class MainConfig:
     # Whether to use the new SAL code.
     use_new_sal: bool = True
 
+    # Random seed for reproducibility. If null, then don't seed the RNG.
+    rng_seed: Optional[int] = 2718
+
     partial: PartialTrainConfig = field(default_factory=PartialTrainConfig)
     log: LogConfig = field(default_factory=LogConfig)
     sal: SALConfig = field(default_factory=SALConfig)
@@ -167,6 +174,12 @@ class MainConfig:
             self.pre_adv_epochs = 1
             self.partial.epochs_between_regens = 2
             self.data.batch_size = 10
+
+    def seed_torch_rng(self):
+        import torch
+
+        if self.rng_seed is not None:
+            torch.manual_seed(self.rng_seed)
 
     @property
     def partial_epoch_save(self) -> int:

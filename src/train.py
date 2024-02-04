@@ -1,5 +1,4 @@
 # -*-coding:utf-8-*-
-import csv
 import logging
 import math
 import os
@@ -14,15 +13,16 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from config import MainConfig, SALConfig
-from einops import einsum, rearrange, reduce
+from einops import einsum, rearrange
 from torch.autograd import grad
 from torch.func import grad_and_value, jacrev
 from torch.utils.data import DataLoader, Dataset, Subset
-from utils import debug_shapes, log_cuda_mem, sizeof_fmt, structure, to_np
+from utils import to_np
 
 config = pyrallis.parse(MainConfig, 'configs/defaults.toml')
 
 config.cli.set_up_logging()
+config.seed_torch_rng()
 
 torch.autograd.set_detect_anomaly(True)
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
@@ -61,6 +61,9 @@ class MyDataset(Dataset):
             self.inputs = self.inputs[:47]
             self.labels = self.labels[:47]
 
+        self.inputs = torch.from_numpy(self.inputs).to(device)
+        self.labels = torch.from_numpy(self.labels).to(device)
+
     @property
     def dim_x(self) -> int:
         return self.inputs.shape[1]
@@ -69,15 +72,11 @@ class MyDataset(Dataset):
         return len(self.inputs)
 
     def __getitem__(self, index):
-        input = self.inputs[index]
-        label = self.labels[index]
-        return torch.tensor(input, dtype=torch.float32).to(device), torch.tensor(
-            label, dtype=torch.float32
-        ).to(device).unsqueeze(0)
+        return self.inputs[index], self.labels[index].unsqueeze(0)
 
     def getSALdata(self):
-        input = np.array(self.inputs[:].tolist())
-        label = np.array(self.labels[:].tolist())
+        input = self.inputs.cpu().numpy()
+        label = self.labels.cpu().numpy()
         return (input, label)
 
 
@@ -90,20 +89,14 @@ class RecurrentDataset(Dataset):
             self.inputs = self.inputs[:47]
             self.labels = self.labels[:47]
 
+        self.inputs = torch.from_numpy(np.stack(self.inputs)).to(device)
+        self.labels = torch.from_numpy(np.stack(self.labels)).to(device)
+
     def __len__(self):
         return len(self.inputs)
 
     def __getitem__(self, index):
-        # input = self.inputs[index].tolist()[:]
-        # label = self.labels[index].tolist()
-        # return torch.tensor(input, dtype=torch.float32).to(device), torch.tensor(
-        #     label, dtype=torch.float32
-        # ).to(device).unsqueeze(0)
-        input = self.inputs[index]
-        label = self.labels[index]
-        return torch.tensor(input, dtype=torch.float32).to(device), torch.tensor(
-            label, dtype=torch.float32
-        ).to(device)
+        return self.inputs[index], self.labels[index]
 
 
 # Step 4: Use DataLoader to create batches
@@ -142,15 +135,12 @@ data = train_dataset.getSALdata()
 def sample_and_remove_from_testset(test_dataloader, num_samples=config.data.batch_size):
     # Step 1: Get the entire test set
     test_dataset = test_dataloader.dataset
-    # TODO set this as config
-    seed = 69
-    torch.manual_seed(seed)
 
     # Step 2: Sample specified number of indices from the test set
-    sampled_indices = torch.randperm(len(test_dataset))
+    with torch.random.fork_rng() as _rng:
+        torch.manual_seed(config.data.test_split_seed)
+        sampled_indices = torch.randperm(len(test_dataset))
 
-    # Set seed again to ensure consistency in the order of indices between runs
-    torch.manual_seed(seed)
     # Select the first num_samples indices from the shuffled indices
     sampled_indices = sampled_indices[:num_samples]
 
@@ -180,40 +170,7 @@ with open('feat_col_name.txt', 'r') as file:
     column_names = file.read().split('\n')
 
 
-# column_names = feature_used_columns
 def save_tensor(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
-    import csv
-
-    ori_data_list = ori_data.clone().cpu().numpy()
-    ori_labels_list = ori_lab.clone().cpu().numpy()
-    adv_data_list = adv_data.clone().cpu().numpy()
-    adv_labels_list = adv_lab.clone().cpu().tolist()
-
-    csv_filename = exp_dir / 'adv' / f'adv_data_labels_in_attack{epoch}_{batch_idx}.csv'
-
-    with open(csv_filename, 'w', newline='') as csvfile:
-        writer = csv.writer(csvfile)
-
-        # Write header
-        header = column_names + ['label']  # [f'feature_{i}' for i in range(ori_data_list.shape[1])]
-        writer.writerow(header)
-
-        # Write data and labels for each group
-        rows_group1 = np.column_stack((ori_data_list, ori_labels_list))
-        # TODO this was a typo?
-        # rows_group2 = np.column_stack((adv_data_list, ori_labels_list))
-        rows_group2 = np.column_stack((adv_data_list, adv_labels_list))
-
-        # Combine data from the first two groups only
-        all_rows = np.vstack((rows_group1, rows_group2))
-
-        writer.writerows(all_rows)
-
-    with open(csv_filename, 'r') as csvfile:
-        return csvfile.read()
-
-
-def save_tensor2(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
     import pandas as pd
 
     ori_data_list = ori_data.clone().cpu().numpy()
@@ -221,7 +178,7 @@ def save_tensor2(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
     adv_data_list = adv_data.clone().cpu().numpy()
     adv_labels_list = adv_lab.clone().cpu().tolist()
 
-    csv_filename = exp_dir / 'adv' / f'adv_data_labels_in_attack{epoch}_{batch_idx}.csv'
+    filename = exp_dir / 'adv' / f'adv_data_labels_in_attack{epoch}_{batch_idx}.feather'
 
     header = column_names + ['label']  # [f'feature_{i}' for i in range(ori_data_list.shape[1])]
 
@@ -233,10 +190,7 @@ def save_tensor2(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
     all_rows = np.vstack((rows_group1, rows_group2))
 
     df = pd.DataFrame(all_rows, columns=header)
-    df.to_csv(csv_filename, index=None)
-
-    with open(csv_filename, 'r') as csvfile:
-        return csvfile.read()
+    df.to_feather(filename)
 
 
 class IRNet_intorch(torch.nn.Module):
@@ -435,12 +389,7 @@ class StableAL:
         self.adversarial_data = (temp_image, temp_label)
 
         # save adv and ori data
-        csv1 = save_tensor(images, labels, temp_image, temp_label, epoch, batch_idx)
-        csv2 = save_tensor2(images, labels, temp_image, temp_label, epoch, batch_idx)
-
-        # print(csv1[:50])
-        # print(csv2[:50])
-        assert csv1 == csv2
+        save_tensor(images, labels, temp_image, temp_label, epoch, batch_idx)
 
         return images_adv, labels
 
