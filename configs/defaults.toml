@@ -4,6 +4,7 @@ early_stop = 500
 max_epochs = 1000
 network_lr = 0.01
 network_loss = "mse"
+use_new_sal = true
 
 [partial]
 epochs_between_regens = 5
@@ -30,6 +31,7 @@ col_name = "delta_e"
 
 [data]
 batch_size = 128
+log_loaders = [ "piezo",]
 
 [cli]
 verbosity = "info"

@@ -151,6 +151,9 @@ class MainConfig:
     # Network loss function.
     network_loss: LossFn = LossFn.mse
 
+    # Whether to use the new SAL code.
+    use_new_sal: bool = True
+
     partial: PartialTrainConfig = field(default_factory=PartialTrainConfig)
     log: LogConfig = field(default_factory=LogConfig)
     sal: SALConfig = field(default_factory=SALConfig)

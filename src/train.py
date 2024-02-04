@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from config import MainConfig, SALConfig
-from einops import einsum, reduce
+from einops import einsum, rearrange, reduce
 from torch.autograd import grad
 from torch.utils.data import DataLoader, Dataset, Subset
 from utils import debug_shapes, sizeof_fmt, to_np
@@ -84,6 +84,10 @@ class RecurrentDataset(Dataset):
     def __init__(self, df):
         self.inputs = df['data'].values
         self.labels = df['label'].values
+
+        if config.smoke_test:
+            self.inputs = self.inputs[:47]
+            self.labels = self.labels[:47]
 
     def __len__(self):
         return len(self.inputs)
@@ -332,6 +336,8 @@ class StableAL:
 
         self.dim_x = dim_x
 
+        self.grad_param = dict(self.model.named_parameters())[sal_conf.grad_layer]
+
         # self.model = IRNet_intorch(dim_x).to(device)
         # # Covariate Weights
         self.weights = torch.zeros(dim_x).reshape(-1, 1) + 100.0
@@ -477,8 +483,6 @@ class StableAL:
     def train_theta(
         self,
         data,
-        epochs_theta,
-        epoch_attack,
         gamma,
         end_flag=False,
         epoch=0,
@@ -506,43 +510,61 @@ class StableAL:
             images_adv = images_adv.to(device)
             outputs = self.model(images_adv)
             loss = self.loss_criterion(outputs, labels.float())
+            loss.backward(retain_graph=True)
+            optimizer.step()
+
+            dloss_dtheta = grad(loss, self.grad_param, create_graph=True)[0].reshape(-1)
+
+            # print(grad(list(dloss_dtheta), images_adv, create_graph=True)[0].shape)
+            dtheta_dx2 = torch.stack(grad(list(dloss_dtheta), images_adv, create_graph=True), 1)
 
             dtheta_dx = []
-            dloss_dtheta = grad(loss, self.model.parameters(), create_graph=True)[4].reshape(-1)
-
             for j in range(dloss_dtheta.shape[0]):
                 # print(f"dloss_dtheta.shape[0]:j     {j}")
                 dtheta_dx.append(grad(dloss_dtheta[j], images_adv, create_graph=True)[0].detach())
+            dtheta_dx = torch.stack(dtheta_dx, 1).detach()
+
+            # debug_shapes('dtheta_dx2', 'dtheta_dx')
+            # print(dtheta_dx2 - dtheta_dx)
 
             if self.xa_grad is None:
                 self.xa_grad = 0
-            self.xa_grad += torch.stack(dtheta_dx, 1).detach()
+            self.xa_grad += dtheta_dx
+
+            # logging.debug(f'self.xa_grad: {self.xa_grad.mean()}')
 
             del dtheta_dx
             del dloss_dtheta
             torch.cuda.empty_cache()
 
-            loss.backward(retain_graph=True)
-            optimizer.step()
         self.xa_grad *= self.conf.xa_grad_reduce
 
     def adv_step(self, data, target, attack_gamma, end_flag, epoch, batch_idx):
-        method.train_theta(
+        self.train_theta(
             (data, target),
-            self.conf.theta_epochs,
-            self.conf.attack_epochs,
             attack_gamma,
             end_flag,
             epoch,
             batch_idx,
         )
-        rtheta = method.r([[data, target]], alpha=self.conf.alpha / math.sqrt(epoch + 1))
-        method.theta_grad = grad(
-            rtheta, list(self.model.parameters()), create_graph=True, allow_unused=True
-        )
-        dr_dx = torch.matmul(self.theta_grad[4].reshape(-1), self.xa_grad).squeeze()
+        rtheta = self.r([[data, target]], alpha=self.conf.alpha / math.sqrt(epoch + 1))
+        self.theta_grad = grad(rtheta, self.grad_param, create_graph=True)[0].reshape(-1)
+        debug_shapes(th_gr=self.theta_grad, xa=self.xa_grad, wg=self.weight_grad)
+        dr_dx = torch.matmul(self.theta_grad, self.xa_grad).squeeze()
+        print(torch.max(abs(dr_dx - einsum(self.theta_grad, self.xa_grad, 'l, b l x -> b x'))))
         deltaw = dr_dx * self.weight_grad
         deltaw = torch.sum(deltaw, 0)
+
+        print(torch.max(abs(deltaw - einsum(dr_dx, self.weight_grad, 'b x, b x -> x'))))
+
+        deltaw2 = einsum(
+            self.theta_grad,
+            self.xa_grad,
+            self.weight_grad,
+            'l, b l dim_x, b dim_x -> dim_x',
+        )
+
+        print(torch.max(abs(deltaw - deltaw2)))
 
         deltaw[zero_list] = 0.0
         max_grad = torch.max(torch.abs(deltaw))
@@ -551,10 +573,9 @@ class StableAL:
         lr_weight = (deltastep / max_grad).detach()
         print(f'RLoss: {rtheta.data}')
 
-    def adv_step_new(self, model, data, target, attack_gamma, end_flag, epoch, batch_idx):
+    def adv_step_new(self, data, target, attack_gamma, end_flag, epoch, batch_idx):
         # TODO split this from adv_target and adv_data
         self.train_theta(
-            model,
             (data, target),
             attack_gamma,
             end_flag,
@@ -565,10 +586,10 @@ class StableAL:
         rtheta = self.r([[data, target]], alpha=self.conf.alpha / math.sqrt(epoch + 1))
         self.theta_grad = grad(
             rtheta,
-            list(model.parameters())[4],
+            self.grad_param,
             # create_graph=True,
             # allow_unused=True,
-        )[0]
+        )[0].reshape(-1)
 
         # dR/dθ: l1 l2
         # dθ/dX: l1 l2 dim_x
@@ -580,7 +601,7 @@ class StableAL:
             self.theta_grad,
             self.xa_grad,
             self.weight_grad,
-            'l1 l2, l1 l2 dim_x, b dim_x -> dim_x',
+            'l, b l dim_x, b dim_x -> dim_x',
         )
         deltaw *= -1
 
@@ -591,7 +612,7 @@ class StableAL:
         logging.debug(f'RLoss: {rtheta.data}')
 
         self.weights -= lr_weight * deltaw.detach().reshape(self.weights.shape)
-
+        logging.debug(f'self.weights.mean(): {self.weights.mean()}')
         # debug_cuda()
 
 
@@ -645,7 +666,6 @@ with prog.Progress(
 
         for batch_idx, (data, target) in enumerate(train_loader):
             # logging.debug(f"current in epoch    {epoch}      batch {batch_idx}")
-            logging.debug(f'CUDA allocated: {sizeof_fmt(torch.cuda.memory_allocated())}')
 
             # Zero the gradients
             optimizer.zero_grad()
@@ -665,7 +685,10 @@ with prog.Progress(
             #     model, data, target, attack_gamma, end_flag, epoch, batch_idx
             # )
 
-            method.adv_step(data, target, attack_gamma, end_flag, epoch, batch_idx)
+            if config.use_new_sal:
+                method.adv_step_new(data, target, attack_gamma, end_flag, epoch, batch_idx)
+            else:
+                method.adv_step(data, target, attack_gamma, end_flag, epoch, batch_idx)
 
             # TODO can this if ever actually not be true?
             if epoch >= config.pre_adv_epochs:

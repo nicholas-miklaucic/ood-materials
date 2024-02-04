@@ -72,3 +72,9 @@ def pretty(vector):
         vlist = vector.view(-1).tolist()
 
     return '[' + ', '.join('{:+.4f}'.format(vi) for vi in vlist) + ']'
+
+
+def log_cuda_mem():
+    import logging
+
+    logging.debug(f'CUDA allocated: {sizeof_fmt(torch.cuda.memory_allocated())}')
