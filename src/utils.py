@@ -2,6 +2,7 @@ import inspect
 import logging
 
 import numpy as np
+from tensorboard import summary
 import torch
 
 
@@ -76,13 +77,50 @@ def pretty(vector):
 
 def structure(obj):
     if isinstance(obj, torch.Tensor):
-        return str(list(obj.shape))
+        return list(obj.shape)
+    elif isinstance(obj, np.ndarray):
+        return summary_stat(torch.tensor(obj))
     elif isinstance(obj, (list, tuple)):
-        return '[{}]'.format(', '.join(map(structure, obj)))
+        return list(map(structure, obj))
     elif isinstance(obj, (float, int)):
         return 'scalar'
+    elif isinstance(obj, dict):
+        return {k: structure(v) for k, v in obj.items()}
     else:
         return str(type(obj))
+
+
+def summary_stat(obj):
+    if isinstance(obj, torch.Tensor):
+        flat = obj.flatten()
+        inds = torch.cos(torch.arange(len(flat), dtype=obj.dtype, device=obj.device))
+        return torch.lerp(flat, inds, 0.1).mean().item()
+    elif isinstance(obj, np.ndarray):
+        return summary_stat(torch.tensor(obj))
+    elif isinstance(obj, (list, tuple)):
+        return list(map(structure, obj))
+    elif isinstance(obj, (float, int)):
+        return 'scalar'
+    elif isinstance(obj, dict):
+        return {k: summary_stat(v) for k, v in obj.items()}
+    else:
+        return str(type(obj))
+
+
+def debug_summarize(show_stat=False, **kwargs):
+    import logging
+
+    for k, v in kwargs.items():
+        logging.debug(f'{k:>30} structure:\t{structure(v)}')
+
+        if show_stat:
+            logging.debug(f'{k:>30} stat:     \t{summary_stat(v)}')
+
+
+def same_storage(x, y):
+    x_ptrs = set(e.data_ptr() for e in x.view(-1))
+    y_ptrs = set(e.data_ptr() for e in y.view(-1))
+    return (x_ptrs <= y_ptrs) or (y_ptrs <= x_ptrs)
 
 
 def log_cuda_mem():

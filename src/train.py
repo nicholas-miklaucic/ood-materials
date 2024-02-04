@@ -4,6 +4,8 @@ import math
 import os
 from datetime import datetime
 from pathlib import Path
+import pprint
+from click import Parameter
 
 import numpy as np
 import pandas as pd
@@ -17,7 +19,7 @@ from einops import einsum, rearrange
 from torch.autograd import grad
 from torch.func import grad_and_value, jacrev
 from torch.utils.data import DataLoader, Dataset, Subset
-from utils import to_np
+from utils import debug_shapes, debug_summarize, log_cuda_mem, same_storage, to_np
 
 config = pyrallis.parse(MainConfig, 'configs/defaults.toml')
 
@@ -301,7 +303,13 @@ class Adam:
 
 
 class StableAL:
-    def __init__(self, model: torch.nn.Module, dim_x: int, sal_conf: SALConfig):
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        dim_x: int,
+        sal_conf: SALConfig,
+        grad_layers: tuple[str] = config.model.grad_layers,
+    ):
         self.weights = None
         self.model = model
         self.weight_grad = None
@@ -319,13 +327,107 @@ class StableAL:
         self.y = None
 
         self.dim_x = dim_x
-
-        self.grad_param = dict(self.model.named_parameters())[sal_conf.grad_layer]
+        self.grad_layers = grad_layers
 
         # self.model = IRNet_intorch(dim_x).to(device)
         # # Covariate Weights
         self.weights = torch.zeros(dim_x).reshape(-1, 1) + 100.0
         self.weights = self.weights.to(device)
+
+    @property
+    def grad_params(self) -> dict[str, Parameter]:
+        """Params of the model used to take gradients."""
+        return {name: self.model.get_parameter(name) for name in sorted(self.grad_layers)}
+
+    @property
+    def grad_param_size(self) -> dict[str, Parameter]:
+        """Total number of parameters with SAL gradients in the model."""
+        return sum([np.prod(list(x.shape)) for x in self.grad_params.values()])
+
+    def unpack_grad_params(self, values: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Destructures values to be dict of parameter values."""
+        unpacked = {}
+        values = values.view(-1)
+        curr_i = 0
+        for name in sorted(self.grad_layers):
+            value = self.model.get_parameter(name)
+            unpacked[name] = values[curr_i : curr_i + value.numel()].view_as(value)
+            curr_i += value.numel()
+
+        if curr_i != len(values):
+            raise ValueError(f'Unused values: {curr_i} != {len(values)}')
+
+        return unpacked
+
+    def pack_grad_params(self, unpacked: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Packs values into a single flattened tensor."""
+        packed = []
+        for name in sorted(unpacked):
+            packed.append(unpacked[name].flatten())
+        return torch.cat(packed)
+
+    # Optimizes the model paremeters such that the loss is minimized
+    # on the adversarial data from self.attack
+    def train_theta(
+        self,
+        data,
+        gamma,
+        end_flag=False,
+        epoch=0,
+        batch_idx=None,
+    ):
+        optimizer = optim.Adam(model.parameters(), lr=self.conf.theta_lr)
+        self.adv_based_on = data
+        # For __ Theta self.conf.theta_epochs
+        for i_theta in range(self.conf.theta_epochs):
+            if i_theta % self.conf.adv_reset_epochs == 0 or not end_flag:
+                images_adv, labels = self.attack(gamma, data, epoch=epoch, batch_idx=batch_idx)
+
+            else:
+                self.adv_again = self.adversarial_data
+                images_adv, labels = self.attack(
+                    gamma,
+                    self.adversarial_data,
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                )
+
+            # print(f"original data: {data[0].shape}")
+            # print(f"attack data: {images_adv.shape}")
+            optimizer.zero_grad()
+            images_adv = images_adv.to(device)
+            outputs = self.model(images_adv)
+            loss = self.loss_criterion(outputs, labels.float())
+
+            dloss_dtheta = grad(loss, self.grad_param, create_graph=True)[0].reshape(-1)
+            # logging.debug(f'dl/dθ: {structure(dloss_dtheta)}')
+            # logging.debug(f'dl/dθ: {dloss_dtheta.mean()}')
+
+            # dtheta_dx2 = torch.stack(grad(list(dloss_dtheta), images_adv, create_graph=True), 1)
+
+            dtheta_dx = []
+            for j in range(dloss_dtheta.shape[0]):
+                # print(f"dloss_dtheta.shape[0]:j     {j}")
+                dtheta_dx.append(grad(dloss_dtheta[j], images_adv, create_graph=True)[0].detach())
+            dtheta_dx = torch.stack(dtheta_dx, 1).detach()
+
+            # debug_shapes('dtheta_dx2', 'dtheta_dx')
+            # print(torch.max(abs(dtheta_dx2 - dtheta_dx)))
+
+            if self.xa_grad is None:
+                self.xa_grad = 0
+            self.xa_grad += dtheta_dx
+
+            # logging.debug(f'self.xa_grad: {self.xa_grad.mean()}')
+
+            del dtheta_dx
+            del dloss_dtheta
+            torch.cuda.empty_cache()
+
+            loss.backward(retain_graph=True)
+            optimizer.step()
+
+        self.xa_grad *= self.conf.xa_grad_reduce
 
     def cost_function(self, x, x_adv):
         # Variable cost level where the weights determine the cost level
@@ -393,8 +495,6 @@ class StableAL:
 
         return images_adv, labels
 
-    # Optimizes the model paremeters such that the loss is minimized
-    # on the adversarial data from self.attack
     def train_theta_new(
         self,
         data,
@@ -429,12 +529,11 @@ class StableAL:
             outputs = model(images_adv)
             loss = self.loss_criterion(outputs, labels.float())
 
-            assert len(list(model.parameters())) == len(list(model.named_parameters()))
-
             # debug_shapes("images_adv", "labels", **nuisance_params)
 
-            def base_loss(grad_param, inputs, targets, nuisance_params):
-                nuisance_params[self.conf.grad_layer] = grad_param.reshape(*self.grad_param.shape)
+            def base_loss(grad_params, inputs, targets, nuisance_params):
+                for name, value in self.unpack_grad_params(grad_params).items():
+                    nuisance_params[name] = value
                 outputs = torch.func.functional_call(model, nuisance_params, inputs)
                 loss = self.loss_criterion(outputs, targets)
                 return loss
@@ -448,23 +547,19 @@ class StableAL:
 
             params = dict(self.model.named_parameters())
 
-            (dloss_dtheta, loss2) = dl_th(self.grad_param, images_adv, labels.float(), params)
-            dloss_dtheta = dloss_dtheta.reshape(-1)
+            # (dloss_dtheta, _loss2) = dl_th(self.grad_params, images_adv, labels, params)
+            # dloss_dtheta = dloss_dtheta.reshape(-1)
 
-            (dtheta_dx, loss3) = d2l_th_x(self.grad_param, images_adv, labels, params)
+            (dtheta_dx, loss3) = d2l_th_x(
+                self.pack_grad_params(self.grad_params), images_adv, labels, params
+            )
             dtheta_dx = dtheta_dx.detach()
+            loss3 = loss3.detach()
 
-            # logging.debug(f'dl/dθ: {structure(dloss_dtheta)}')
-            # logging.debug(f'dl/dθ: {dloss_dtheta.mean()}')
-            # logging.debug(f'loss: {structure(loss)}')
-            # logging.debug(f'loss: {loss.mean()}')
-            # logging.debug(f'loss2: {structure(loss2)}')
-            # logging.debug(f'loss2: {loss2.mean()}')
-            # logging.debug(f'loss3: {structure(loss3)}')
-            # logging.debug(f'loss3: {loss3.mean()}')
+            # debug_summarize(**dict(self.model.named_parameters()))
 
             # dtheta_dx = reduce(dtheta_dx, 'l1 l2 batch dim_x -> l1 l2 dim_x', 'sum')
-            dtheta_dx = rearrange(dtheta_dx, 'l1 l2 batch dim_x -> batch (l1 l2) dim_x')
+            dtheta_dx = rearrange(dtheta_dx, 'theta batch dim_x -> batch theta dim_x')
 
             if self.xa_grad is None:
                 self.xa_grad = 0
@@ -473,69 +568,6 @@ class StableAL:
             loss.backward(retain_graph=True)
             optimizer.step()
             # raise ValueError('Stop!')
-
-        self.xa_grad *= self.conf.xa_grad_reduce
-
-    # Optimizes the model paremeters such that the loss is minimized
-    # on the adversarial data from self.attack
-    def train_theta(
-        self,
-        data,
-        gamma,
-        end_flag=False,
-        epoch=0,
-        batch_idx=None,
-    ):
-        optimizer = optim.Adam(model.parameters(), lr=self.conf.theta_lr)
-        self.adv_based_on = data
-        # For __ Theta self.conf.theta_epochs
-        for i_theta in range(self.conf.theta_epochs):
-            if i_theta % self.conf.adv_reset_epochs == 0 or not end_flag:
-                images_adv, labels = self.attack(gamma, data, epoch=epoch, batch_idx=batch_idx)
-
-            else:
-                self.adv_again = self.adversarial_data
-                images_adv, labels = self.attack(
-                    gamma,
-                    self.adversarial_data,
-                    epoch=epoch,
-                    batch_idx=batch_idx,
-                )
-
-            # print(f"original data: {data[0].shape}")
-            # print(f"attack data: {images_adv.shape}")
-            optimizer.zero_grad()
-            images_adv = images_adv.to(device)
-            outputs = self.model(images_adv)
-            loss = self.loss_criterion(outputs, labels.float())
-
-            dloss_dtheta = grad(loss, self.grad_param, create_graph=True)[0].reshape(-1)
-            # logging.debug(f'dl/dθ: {structure(dloss_dtheta)}')
-            # logging.debug(f'dl/dθ: {dloss_dtheta.mean()}')
-
-            # dtheta_dx2 = torch.stack(grad(list(dloss_dtheta), images_adv, create_graph=True), 1)
-
-            dtheta_dx = []
-            for j in range(dloss_dtheta.shape[0]):
-                # print(f"dloss_dtheta.shape[0]:j     {j}")
-                dtheta_dx.append(grad(dloss_dtheta[j], images_adv, create_graph=True)[0].detach())
-            dtheta_dx = torch.stack(dtheta_dx, 1).detach()
-
-            # debug_shapes('dtheta_dx2', 'dtheta_dx')
-            # print(torch.max(abs(dtheta_dx2 - dtheta_dx)))
-
-            if self.xa_grad is None:
-                self.xa_grad = 0
-            self.xa_grad += dtheta_dx
-
-            # logging.debug(f'self.xa_grad: {self.xa_grad.mean()}')
-
-            del dtheta_dx
-            del dloss_dtheta
-            torch.cuda.empty_cache()
-
-            loss.backward(retain_graph=True)
-            optimizer.step()
 
         self.xa_grad *= self.conf.xa_grad_reduce
 
@@ -559,22 +591,28 @@ class StableAL:
             )
 
         rtheta = self.r([[data, target]], alpha=self.conf.alpha / math.sqrt(epoch + 1))
+
+        # debug_summarize(grad_params=self.grad_params)
         self.theta_grad = grad(
             rtheta,
-            self.grad_param,
-        )[0].reshape(-1)
+            [self.model.get_parameter(n) for n in sorted(self.grad_layers)],
+        )
 
-        # dR/dθ: l1 l2
-        # dθ/dX: l1 l2 dim_x
-        # dX/dw: dim_x
+        self.theta_grad = self.pack_grad_params(
+            {n: gradient for gradient, n in zip(self.theta_grad, sorted(self.grad_layers))}
+        )
 
         # debug_shapes(th_gr=self.theta_grad, xa=self.xa_grad, wg=self.weight_grad)
+
+        # dR/dθ: theta
+        # dθ/dX: batch theta dim_x
+        # dX/dw: batch dim_x
 
         deltaw = einsum(
             self.theta_grad,
             self.xa_grad,
             self.weight_grad,
-            'l, b l dim_x, b dim_x -> dim_x',
+            'theta, batch theta dim_x, batch dim_x -> dim_x',
         )
         deltaw *= -1
 
@@ -582,15 +620,23 @@ class StableAL:
         max_grad = torch.max(torch.abs(deltaw))
         deltastep = self.conf.deltaall
         lr_weight = (deltastep / max_grad).detach()
-        logging.debug(f'RLoss: {rtheta.data}')
+        logging.debug(f'RLoss: {rtheta.data:.4f}')
 
         self.weights -= lr_weight * deltaw.detach().reshape(self.weights.shape)
-        logging.debug(f'self.weights.mean(): {self.weights.mean()}')
-        # log_cuda_mem()
+        # logging.debug(f'self.weights.mean(): {self.weights.mean()}')
+        log_cuda_mem()
 
 
 model = IRNet_intorch(train_dataset.dim_x).to(device)
 optimizer = optim.Adam(model.parameters(), lr=config.network_lr)
+
+model_params = dict(model.named_parameters())
+for layer in config.model.grad_layers:
+    if layer not in model_params:
+        raise ValueError(
+            f'Layer {layer} is not in model!\nModel params:\n' + pprint(list(model_params.keys()))
+        )
+
 
 method = StableAL(model, train_dataset.dim_x, config.sal)
 # TODO in StableAL([train_dataset.getSALdata()]), why was the list being passed in? AFAIK it wasn't

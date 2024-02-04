@@ -19,6 +19,14 @@ class LossFn(Enum):
 
 
 @dataclass
+class ModelConfig:
+    """Configuration for model."""
+
+    # Layers to use inside SAL for gradients.
+    grad_layers: tuple[str] = ('fc16.weight',)
+
+
+@dataclass
 class SALConfig:
     """Configuration for SAL optimizer."""
 
@@ -52,9 +60,6 @@ class SALConfig:
 
     # Number of epochs between restarting adversarial data generation.
     adv_reset_epochs: int = 5
-
-    # Layer of model used for gradients.
-    grad_layer: str = 'fc16.weight'
 
     @property
     def loss_criterion(self):
@@ -167,6 +172,7 @@ class MainConfig:
     target: TargetConfig = field(default_factory=TargetConfig)
     data: DataConfig = field(default_factory=DataConfig)
     cli: CLIConfig = field(default_factory=CLIConfig)
+    model: ModelConfig = field(default_factory=ModelConfig)
 
     def __post_init__(self):
         if self.smoke_test:

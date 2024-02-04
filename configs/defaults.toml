@@ -25,7 +25,6 @@ attack_epochs = 2
 theta_lr = 0.01
 theta_epochs = 10
 adv_reset_epochs = 5
-grad_layer = "fc16.weight"
 
 [target]
 col_name = "delta_e"
@@ -38,3 +37,6 @@ test_split_seed = 3141
 [cli]
 verbosity = "info"
 show_progress = true
+
+[model]
+grad_layers = [ "fc16.weight",]
