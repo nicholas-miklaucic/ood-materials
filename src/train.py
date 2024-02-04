@@ -17,7 +17,7 @@ from config import MainConfig, SALConfig
 from einops import einsum, rearrange, reduce
 from torch.autograd import grad
 from torch.utils.data import DataLoader, Dataset, Subset
-from utils import debug_shapes, sizeof_fmt, to_np
+from utils import debug_shapes, sizeof_fmt, structure, to_np
 
 config = pyrallis.parse(MainConfig, 'configs/defaults.toml')
 
@@ -413,13 +413,13 @@ class StableAL:
     # on the adversarial data from self.attack
     def train_theta_new(
         self,
-        model,
         data,
         gamma,
         end_flag=False,
         epoch=0,
         batch_idx=None,
     ):
+        model = self.model
         optimizer = optim.Adam(model.parameters(), lr=self.conf.theta_lr)
         self.adv_based_on = data
         # For __ Theta self.conf.theta_epochs
@@ -444,38 +444,54 @@ class StableAL:
             images_adv = images_adv.to(device)
             outputs = model(images_adv)
             loss = self.loss_criterion(outputs, labels.float())
-            loss.backward()
-            optimizer.step()
 
             assert len(list(model.parameters())) == len(list(model.named_parameters()))
 
-            nuisance_params = {k: v.detach() for k, v in model.named_parameters()}
-            assert self.conf.grad_layer in nuisance_params
-            grad_param = nuisance_params.pop(self.conf.grad_layer)
-
-            from torch.func import jacfwd
+            from torch.func import jacfwd, jacrev, grad as funcgrad, grad_and_value
 
             # debug_shapes("images_adv", "labels", **nuisance_params)
 
             def base_loss(grad_param, inputs, targets, nuisance_params):
-                nuisance_params[self.conf.grad_layer] = grad_param.reshape(16, 16)
+                nuisance_params[self.conf.grad_layer] = grad_param.reshape(*self.grad_param.shape)
                 outputs = torch.func.functional_call(model, nuisance_params, inputs)
                 loss = self.loss_criterion(outputs, targets)
                 return loss
 
-            dl_th = jacfwd(base_loss)
+            dl_th = grad_and_value(base_loss)
 
             # l_th_out = dl_th(grad_param, images_adv, labels, nuisance_params)
             # debug_shapes("l_th_out")
 
-            d2l_th_x = jacfwd(dl_th, argnums=1)
+            d2l_th_x = jacrev(dl_th, argnums=1, has_aux=True)
 
-            dtheta_dx = d2l_th_x(grad_param, images_adv, labels, nuisance_params)
+            params = dict(self.model.named_parameters())
 
-            dtheta_dx = reduce(dtheta_dx, 'l1 l2 batch dim_x -> l1 l2 dim_x', 'sum')
+            (dloss_dtheta, loss2) = dl_th(self.grad_param, images_adv, labels.float(), params)
+            dloss_dtheta = dloss_dtheta.reshape(-1)
 
-            self.xa_grad = 0 if self.xa_grad is None else self.xa_grad
+            (dtheta_dx, loss3) = d2l_th_x(self.grad_param, images_adv, labels, params)
+            dtheta_dx = dtheta_dx.detach()
+
+            # logging.debug(f'dl/dθ: {structure(dloss_dtheta)}')
+            # logging.debug(f'dl/dθ: {dloss_dtheta.mean()}')
+            # logging.debug(f'loss: {structure(loss)}')
+            # logging.debug(f'loss: {loss.mean()}')
+            # logging.debug(f'loss2: {structure(loss2)}')
+            # logging.debug(f'loss2: {loss2.mean()}')
+            # logging.debug(f'loss3: {structure(loss3)}')
+            # logging.debug(f'loss3: {loss3.mean()}')
+
+            # dtheta_dx = reduce(dtheta_dx, 'l1 l2 batch dim_x -> l1 l2 dim_x', 'sum')
+            dtheta_dx = rearrange(dtheta_dx, 'l1 l2 batch dim_x -> batch (l1 l2) dim_x')
+
+            if self.xa_grad is None:
+                self.xa_grad = 0
             self.xa_grad += dtheta_dx
+
+            loss.backward(retain_graph=True)
+            optimizer.step()
+            # raise ValueError('Stop!')
+
         self.xa_grad *= self.conf.xa_grad_reduce
 
     # Optimizes the model paremeters such that the loss is minimized
@@ -510,13 +526,12 @@ class StableAL:
             images_adv = images_adv.to(device)
             outputs = self.model(images_adv)
             loss = self.loss_criterion(outputs, labels.float())
-            loss.backward(retain_graph=True)
-            optimizer.step()
 
             dloss_dtheta = grad(loss, self.grad_param, create_graph=True)[0].reshape(-1)
+            # logging.debug(f'dl/dθ: {structure(dloss_dtheta)}')
+            # logging.debug(f'dl/dθ: {dloss_dtheta.mean()}')
 
-            # print(grad(list(dloss_dtheta), images_adv, create_graph=True)[0].shape)
-            dtheta_dx2 = torch.stack(grad(list(dloss_dtheta), images_adv, create_graph=True), 1)
+            # dtheta_dx2 = torch.stack(grad(list(dloss_dtheta), images_adv, create_graph=True), 1)
 
             dtheta_dx = []
             for j in range(dloss_dtheta.shape[0]):
@@ -525,7 +540,7 @@ class StableAL:
             dtheta_dx = torch.stack(dtheta_dx, 1).detach()
 
             # debug_shapes('dtheta_dx2', 'dtheta_dx')
-            # print(dtheta_dx2 - dtheta_dx)
+            # print(torch.max(abs(dtheta_dx2 - dtheta_dx)))
 
             if self.xa_grad is None:
                 self.xa_grad = 0
@@ -537,51 +552,29 @@ class StableAL:
             del dloss_dtheta
             torch.cuda.empty_cache()
 
+            loss.backward(retain_graph=True)
+            optimizer.step()
+
         self.xa_grad *= self.conf.xa_grad_reduce
-
-    def adv_step(self, data, target, attack_gamma, end_flag, epoch, batch_idx):
-        self.train_theta(
-            (data, target),
-            attack_gamma,
-            end_flag,
-            epoch,
-            batch_idx,
-        )
-        rtheta = self.r([[data, target]], alpha=self.conf.alpha / math.sqrt(epoch + 1))
-        self.theta_grad = grad(rtheta, self.grad_param, create_graph=True)[0].reshape(-1)
-        debug_shapes(th_gr=self.theta_grad, xa=self.xa_grad, wg=self.weight_grad)
-        dr_dx = torch.matmul(self.theta_grad, self.xa_grad).squeeze()
-        print(torch.max(abs(dr_dx - einsum(self.theta_grad, self.xa_grad, 'l, b l x -> b x'))))
-        deltaw = dr_dx * self.weight_grad
-        deltaw = torch.sum(deltaw, 0)
-
-        print(torch.max(abs(deltaw - einsum(dr_dx, self.weight_grad, 'b x, b x -> x'))))
-
-        deltaw2 = einsum(
-            self.theta_grad,
-            self.xa_grad,
-            self.weight_grad,
-            'l, b l dim_x, b dim_x -> dim_x',
-        )
-
-        print(torch.max(abs(deltaw - deltaw2)))
-
-        deltaw[zero_list] = 0.0
-        max_grad = torch.max(torch.abs(deltaw))
-        deltastep = self.conf.deltaall
-        # TODO what's going on here?
-        lr_weight = (deltastep / max_grad).detach()
-        print(f'RLoss: {rtheta.data}')
 
     def adv_step_new(self, data, target, attack_gamma, end_flag, epoch, batch_idx):
         # TODO split this from adv_target and adv_data
-        self.train_theta(
-            (data, target),
-            attack_gamma,
-            end_flag,
-            epoch,
-            batch_idx,
-        )
+        if config.use_new_sal:
+            self.train_theta_new(
+                (data, target),
+                attack_gamma,
+                end_flag,
+                epoch,
+                batch_idx,
+            )
+        else:
+            self.train_theta(
+                (data, target),
+                attack_gamma,
+                end_flag,
+                epoch,
+                batch_idx,
+            )
 
         rtheta = self.r([[data, target]], alpha=self.conf.alpha / math.sqrt(epoch + 1))
         self.theta_grad = grad(
@@ -685,10 +678,7 @@ with prog.Progress(
             #     model, data, target, attack_gamma, end_flag, epoch, batch_idx
             # )
 
-            if config.use_new_sal:
-                method.adv_step_new(data, target, attack_gamma, end_flag, epoch, batch_idx)
-            else:
-                method.adv_step(data, target, attack_gamma, end_flag, epoch, batch_idx)
+            method.adv_step_new(data, target, attack_gamma, end_flag, epoch, batch_idx)
 
             # TODO can this if ever actually not be true?
             if epoch >= config.pre_adv_epochs:

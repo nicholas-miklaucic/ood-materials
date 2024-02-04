@@ -74,6 +74,17 @@ def pretty(vector):
     return '[' + ', '.join('{:+.4f}'.format(vi) for vi in vlist) + ']'
 
 
+def structure(obj):
+    if isinstance(obj, torch.Tensor):
+        return str(list(obj.shape))
+    elif isinstance(obj, (list, tuple)):
+        return '[{}]'.format(', '.join(map(structure, obj)))
+    elif isinstance(obj, (float, int)):
+        return 'scalar'
+    else:
+        return str(type(obj))
+
+
 def log_cuda_mem():
     import logging
 
