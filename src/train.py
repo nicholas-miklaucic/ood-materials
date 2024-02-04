@@ -343,8 +343,6 @@ class IRNet_intorch(torch.nn.Module):
         self.fc64 = nn.Linear(64, 64)
         self.fc16 = nn.Linear(16, 16)
 
-
-        if
         self.bn128 = nn.BatchNorm1d(128)
         self.bn64 = nn.BatchNorm1d(64)
         self.bn16 = nn.BatchNorm1d(16)
@@ -562,7 +560,7 @@ class StableAL:
 
     # Optimizes the model paremeters such that the loss is minimized
     # on the adversarial data from self.attack
-    def train_theta(
+    def train_theta_new(
         self,
         model,
         data,
@@ -631,7 +629,95 @@ class StableAL:
             self.xa_grad += dtheta_dx
         self.xa_grad *= self.conf.xa_grad_reduce
 
-    def adv_step(self, model, data, target, attack_gamma, end_flag, epoch, batch_idx):
+    # Optimizes the model paremeters such that the loss is minimized
+    # on the adversarial data from self.attack
+    def train_theta(
+        self,
+        data,
+        epochs_theta,
+        epoch_attack,
+        gamma,
+        end_flag=False,
+        epoch=0,
+        batch_idx=None,
+    ):
+        optimizer = optim.Adam(model.parameters(), lr=self.conf.theta_lr)
+        self.adv_based_on = data
+        # For __ Theta self.conf.theta_epochs
+        for i_theta in range(self.conf.theta_epochs):
+            if i_theta % self.conf.adv_reset_epochs == 0 or not end_flag:
+                images_adv, labels = self.attack(
+                    gamma, data, epoch=epoch, batch_idx=batch_idx
+                )
+
+            else:
+                self.adv_again = self.adversarial_data
+                images_adv, labels = self.attack(
+                    gamma,
+                    self.adversarial_data,
+                    epoch=epoch,
+                    batch_idx=batch_idx,
+                )
+
+            # print(f"original data: {data[0].shape}")
+            # print(f"attack data: {images_adv.shape}")
+            optimizer.zero_grad()
+            images_adv = images_adv.to(device)
+            outputs = self.model(images_adv)
+            loss = self.loss_criterion(outputs, labels.float())
+
+            dtheta_dx = []
+            dloss_dtheta = grad(loss, self.model.parameters(), create_graph=True)[
+                4
+            ].reshape(-1)
+
+            for j in range(dloss_dtheta.shape[0]):
+                # print(f"dloss_dtheta.shape[0]:j     {j}")
+                dtheta_dx.append(
+                    grad(dloss_dtheta[j], images_adv, create_graph=True)[0].detach()
+                )
+
+            if self.xa_grad is None:
+                self.xa_grad = 0
+            self.xa_grad += torch.stack(dtheta_dx, 1).detach()
+
+            del dtheta_dx
+            del dloss_dtheta
+            torch.cuda.empty_cache()
+
+            loss.backward(retain_graph=True)
+            optimizer.step()
+        self.xa_grad *= self.conf.xa_grad_reduce
+
+    def adv_step(self, data, target, attack_gamma, end_flag, epoch, batch_idx):
+        method.train_theta(
+            (data, target),
+            self.conf.theta_epochs,
+            self.conf.attack_epochs,
+            attack_gamma,
+            end_flag,
+            epoch,
+            batch_idx,
+        )
+        rtheta = method.r(
+            [[data, target]], alpha=self.conf.alpha / math.sqrt(epoch + 1)
+        )
+        method.theta_grad = grad(
+            rtheta, list(self.model.parameters()), create_graph=True, allow_unused=True
+        )
+        dr_dx = torch.matmul(self.theta_grad[4].reshape(-1), self.xa_grad).squeeze()
+        deltaw = dr_dx * self.weight_grad
+        deltaw = torch.sum(deltaw, 0)
+
+        deltaw[zero_list] = 0.0
+        max_grad = torch.max(torch.abs(deltaw))
+        deltastep = self.conf.deltaall
+        lr_weight = (deltastep / max_grad).detach()
+        print(f"RLoss: {rtheta.data}")
+
+    def adv_step_new(
+        self, model, data, target, attack_gamma, end_flag, epoch, batch_idx
+    ):
         # TODO split this from adv_target and adv_data
         self.train_theta(
             model,
@@ -766,9 +852,11 @@ with prog.Progress(
             if epoch < config.pre_adv_epochs:
                 continue
 
-            method.adv_step(
-                model, data, target, attack_gamma, end_flag, epoch, batch_idx
-            )
+            # method.adv_step(
+            #     model, data, target, attack_gamma, end_flag, epoch, batch_idx
+            # )
+
+            method.adv_step(data, target, attack_gamma, end_flag, epoch, batch_idx)
 
             # TODO can this if ever actually not be true?
             if epoch >= config.pre_adv_epochs:
