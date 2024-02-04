@@ -39,4 +39,4 @@ verbosity = "info"
 show_progress = true
 
 [model]
-grad_layers = [ "fc16.weight",]
+grad_layers = [ "fc128.weight", "fc64.weight", "fc16.weight",]

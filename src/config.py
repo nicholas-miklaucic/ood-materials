@@ -2,11 +2,16 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from pprint import pprint
 from typing import Optional
+from attr import mutable
+import pandas as pd
 
 import pyrallis
 import torch
 from pyrallis import field
+
+from utils import sizeof_fmt
 
 pyrallis.set_config_type('toml')
 
@@ -18,12 +23,50 @@ class LossFn(Enum):
     l1 = 'l1'
 
 
+# self.fc128 = nn.Linear(128, 128)
+# self.fc64 = nn.Linear(64, 64)
+# self.fc16 = nn.Linear(16, 16)
+
+# self.bn128 = nn.BatchNorm1d(128)
+# self.bn64 = nn.BatchNorm1d(64)
+# self.bn16 = nn.BatchNorm1d(16)
+
+# self.relu = nn.ReLU()
+# self.inputlayer = nn.Linear(input_size, 128)
+
+# self.con128_64 = nn.Linear(128, 64)
+# self.con64_16 = nn.Linear(64, 16)
+# self.output16 = nn.Linear(16, 1)
+
+
 @dataclass
 class ModelConfig:
     """Configuration for model."""
 
     # Layers to use inside SAL for gradients.
-    grad_layers: tuple[str] = ('fc16.weight',)
+    grad_layers: list[str] = field(
+        default=[
+            'fc16.weight',
+        ],
+        is_mutable=True,
+    )
+
+    def show_grad_layers(self, model):
+        """Shows memory usage for grad layers."""
+        param_names = dict(model.named_parameters())
+        table = []
+        for layer in self.grad_layers:
+            if layer not in param_names:
+                raise ValueError(
+                    f'Layer {layer} is not in model!\nModel params:\n'
+                    + pprint(list(param_names.keys()))
+                )
+
+            val = model.get_parameter(layer)
+            table.append([layer, list(val.shape), sizeof_fmt(val.element_size() * val.numel())])
+
+        table = pd.DataFrame(table, columns=['Layer', 'Shape', 'Size'])
+        return table.to_string(index=None)
 
 
 @dataclass

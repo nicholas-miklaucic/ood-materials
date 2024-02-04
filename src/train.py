@@ -21,7 +21,7 @@ from torch.func import grad_and_value, jacrev
 from torch.utils.data import DataLoader, Dataset, Subset
 from utils import debug_shapes, debug_summarize, log_cuda_mem, same_storage, to_np
 
-config = pyrallis.parse(MainConfig, 'configs/defaults.toml')
+config = pyrallis.parse(MainConfig)
 
 config.cli.set_up_logging()
 config.seed_torch_rng()
@@ -317,7 +317,7 @@ class StableAL:
         self.theta_grad = None
         self.gamma = None
         self.adversarial_data = None
-        self.loss_criterion = torch.nn.MSELoss()
+        self.loss_criterion = sal_conf.loss_criterion
 
         self.conf = sal_conf
         self.adv_based_on = None
@@ -550,11 +550,10 @@ class StableAL:
             # (dloss_dtheta, _loss2) = dl_th(self.grad_params, images_adv, labels, params)
             # dloss_dtheta = dloss_dtheta.reshape(-1)
 
-            (dtheta_dx, loss3) = d2l_th_x(
-                self.pack_grad_params(self.grad_params), images_adv, labels, params
-            )
-            dtheta_dx = dtheta_dx.detach()
-            loss3 = loss3.detach()
+            with torch.no_grad():
+                (dtheta_dx, _loss3) = d2l_th_x(
+                    self.pack_grad_params(self.grad_params), images_adv, labels, params
+                )
 
             # debug_summarize(**dict(self.model.named_parameters()))
 
@@ -567,9 +566,10 @@ class StableAL:
 
             loss.backward(retain_graph=True)
             optimizer.step()
-            # raise ValueError('Stop!')
 
         self.xa_grad *= self.conf.xa_grad_reduce
+        logging.debug('Memory after train_theta():')
+        log_cuda_mem()
 
     def adv_step_new(self, data, target, attack_gamma, end_flag, epoch, batch_idx):
         # TODO split this from adv_target and adv_data
@@ -608,6 +608,8 @@ class StableAL:
         # dθ/dX: batch theta dim_x
         # dX/dw: batch dim_x
 
+        # If this ever becomes an issue with memory (dθ/dX doesn't fit), it should be possible to
+        # do the VJP instead.
         deltaw = einsum(
             self.theta_grad,
             self.xa_grad,
@@ -623,19 +625,13 @@ class StableAL:
         logging.debug(f'RLoss: {rtheta.data:.4f}')
 
         self.weights -= lr_weight * deltaw.detach().reshape(self.weights.shape)
-        # logging.debug(f'self.weights.mean(): {self.weights.mean()}')
-        log_cuda_mem()
+        logging.debug(f'self.weights.mean(): {self.weights.mean()}')
 
 
 model = IRNet_intorch(train_dataset.dim_x).to(device)
 optimizer = optim.Adam(model.parameters(), lr=config.network_lr)
 
-model_params = dict(model.named_parameters())
-for layer in config.model.grad_layers:
-    if layer not in model_params:
-        raise ValueError(
-            f'Layer {layer} is not in model!\nModel params:\n' + pprint(list(model_params.keys()))
-        )
+logging.debug(config.model.show_grad_layers(model))
 
 
 method = StableAL(model, train_dataset.dim_x, config.sal)
@@ -701,6 +697,8 @@ with prog.Progress(
                 continue
 
             method.adv_step_new(data, target, attack_gamma, end_flag, epoch, batch_idx)
+            logging.debug('Memory after adv_step():')
+            log_cuda_mem()
 
             # TODO can this if ever actually not be true?
             if epoch >= config.pre_adv_epochs:
