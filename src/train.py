@@ -16,8 +16,9 @@ import torch.optim as optim
 from config import MainConfig, SALConfig
 from einops import einsum, rearrange, reduce
 from torch.autograd import grad
+from torch.func import grad_and_value, jacrev
 from torch.utils.data import DataLoader, Dataset, Subset
-from utils import debug_shapes, sizeof_fmt, structure, to_np
+from utils import debug_shapes, log_cuda_mem, sizeof_fmt, structure, to_np
 
 config = pyrallis.parse(MainConfig, 'configs/defaults.toml')
 
@@ -176,7 +177,7 @@ piezo_adv_loader, piezo1_test_loader = sample_and_remove_from_testset(data_sets[
 
 
 with open('feat_col_name.txt', 'r') as file:
-    column_names = file.read().split()
+    column_names = file.read().split('\n')
 
 
 # column_names = feature_used_columns
@@ -207,6 +208,35 @@ def save_tensor(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
         all_rows = np.vstack((rows_group1, rows_group2))
 
         writer.writerows(all_rows)
+
+    with open(csv_filename, 'r') as csvfile:
+        return csvfile.read()
+
+
+def save_tensor2(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
+    import pandas as pd
+
+    ori_data_list = ori_data.clone().cpu().numpy()
+    ori_labels_list = ori_lab.clone().cpu().numpy()
+    adv_data_list = adv_data.clone().cpu().numpy()
+    adv_labels_list = adv_lab.clone().cpu().tolist()
+
+    csv_filename = exp_dir / 'adv' / f'adv_data_labels_in_attack{epoch}_{batch_idx}.csv'
+
+    header = column_names + ['label']  # [f'feature_{i}' for i in range(ori_data_list.shape[1])]
+
+    # Write data and labels for each group
+    rows_group1 = np.column_stack((ori_data_list, ori_labels_list))
+    # TODO this was a typo?
+    # rows_group2 = np.column_stack((adv_data_list, ori_labels_list))
+    rows_group2 = np.column_stack((adv_data_list, adv_labels_list))
+    all_rows = np.vstack((rows_group1, rows_group2))
+
+    df = pd.DataFrame(all_rows, columns=header)
+    df.to_csv(csv_filename, index=None)
+
+    with open(csv_filename, 'r') as csvfile:
+        return csvfile.read()
 
 
 class IRNet_intorch(torch.nn.Module):
@@ -405,7 +435,12 @@ class StableAL:
         self.adversarial_data = (temp_image, temp_label)
 
         # save adv and ori data
-        save_tensor(images, labels, temp_image, temp_label, epoch, batch_idx)
+        csv1 = save_tensor(images, labels, temp_image, temp_label, epoch, batch_idx)
+        csv2 = save_tensor2(images, labels, temp_image, temp_label, epoch, batch_idx)
+
+        # print(csv1[:50])
+        # print(csv2[:50])
+        assert csv1 == csv2
 
         return images_adv, labels
 
@@ -446,8 +481,6 @@ class StableAL:
             loss = self.loss_criterion(outputs, labels.float())
 
             assert len(list(model.parameters())) == len(list(model.named_parameters()))
-
-            from torch.func import jacfwd, jacrev, grad as funcgrad, grad_and_value
 
             # debug_shapes("images_adv", "labels", **nuisance_params)
 
@@ -580,15 +613,13 @@ class StableAL:
         self.theta_grad = grad(
             rtheta,
             self.grad_param,
-            # create_graph=True,
-            # allow_unused=True,
         )[0].reshape(-1)
 
         # dR/dθ: l1 l2
         # dθ/dX: l1 l2 dim_x
         # dX/dw: dim_x
 
-        debug_shapes(th_gr=self.theta_grad, xa=self.xa_grad, wg=self.weight_grad)
+        # debug_shapes(th_gr=self.theta_grad, xa=self.xa_grad, wg=self.weight_grad)
 
         deltaw = einsum(
             self.theta_grad,
@@ -606,7 +637,7 @@ class StableAL:
 
         self.weights -= lr_weight * deltaw.detach().reshape(self.weights.shape)
         logging.debug(f'self.weights.mean(): {self.weights.mean()}')
-        # debug_cuda()
+        # log_cuda_mem()
 
 
 model = IRNet_intorch(train_dataset.dim_x).to(device)
@@ -673,10 +704,6 @@ with prog.Progress(
             partial_train_loss += loss.cpu().item()
             if epoch < config.pre_adv_epochs:
                 continue
-
-            # method.adv_step(
-            #     model, data, target, attack_gamma, end_flag, epoch, batch_idx
-            # )
 
             method.adv_step_new(data, target, attack_gamma, end_flag, epoch, batch_idx)
 
