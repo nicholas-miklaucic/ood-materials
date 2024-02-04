@@ -1,21 +1,20 @@
-from dataclasses import dataclass
 import logging
-from pathlib import Path
-import pyrallis
-from pyrallis import field
-import torch
-import typing
+from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 
+import pyrallis
+import torch
+from pyrallis import field
 
-pyrallis.set_config_type("toml")
+pyrallis.set_config_type('toml')
 
 
 class LossFn(Enum):
-    mse = "mse"
-    smooth_l1 = "smooth_l1"
-    huber = "huber"
-    l1 = "l1"
+    mse = 'mse'
+    smooth_l1 = 'smooth_l1'
+    huber = 'huber'
+    l1 = 'l1'
 
 
 @dataclass
@@ -54,24 +53,27 @@ class SALConfig:
     adv_reset_epochs: int = 5
 
     # Layer of model used for gradients.
-    grad_layer: str = "fc16.weight"
+    grad_layer: str = 'fc16.weight'
 
     @property
     def loss_criterion(self):
         """Gets the target loss function. Default: mse_loss."""
-        return getattr(torch.nn.functional, f"{self.target_loss.value}_loss")
+        return getattr(torch.nn.functional, f'{self.target_loss.value}_loss')
 
 
 @dataclass
 class TargetConfig:
     # Name of column used for targets.
-    col_name: str = "delta_e"
+    col_name: str = 'delta_e'
 
 
 @dataclass
 class DataConfig:
     # Batch size.
     batch_size: int = 128
+
+    # Loaders to use. Always includes the R splits.
+    log_loaders: tuple[str] = ('piezo',)
 
 
 @dataclass
@@ -90,7 +92,7 @@ class LogConfig:
     partial_regens_per_log: int = 10
 
     # Where logging data goes. Relative to current directory.
-    exp_base_dir: Path = Path("exps")
+    exp_base_dir: Path = Path('exps')
 
 
 class LoggingLevel(Enum):
@@ -115,8 +117,8 @@ class CLIConfig:
 
         logging.basicConfig(
             level=self.verbosity.value,
-            format="%(message)s",
-            datefmt="[%X]",
+            format='%(message)s',
+            datefmt='[%X]',
             handlers=[
                 RichHandler(
                     rich_tracebacks=True,
@@ -171,24 +173,25 @@ class MainConfig:
     @property
     def loss_criterion(self):
         """Gets the network's loss function. Default: mse_loss."""
-        return getattr(torch.nn.functional, f"{self.network_loss.value}_loss")
+        return getattr(torch.nn.functional, f'{self.network_loss.value}_loss')
 
 
-if __name__ == "__main__":
-    from rich.prompt import Confirm
+if __name__ == '__main__':
     from pathlib import Path
 
-    if Confirm.ask("Generate configs/defaults.toml and configs/minimal.toml?"):
-        default_path = Path("configs") / "defaults.toml"
-        minimal_path = Path("configs") / "minimal.toml"
+    from rich.prompt import Confirm
+
+    if Confirm.ask('Generate configs/defaults.toml and configs/minimal.toml?'):
+        default_path = Path('configs') / 'defaults.toml'
+        minimal_path = Path('configs') / 'minimal.toml'
 
         default = MainConfig()
 
-        with open(default_path, "w") as outfile:
+        with open(default_path, 'w') as outfile:
             pyrallis.cfgparsing.dump(default, outfile)
 
-        with open(minimal_path, "w") as outfile:
+        with open(minimal_path, 'w') as outfile:
             pyrallis.cfgparsing.dump(default, outfile, omit_defaults=True)
 
-        with default_path.open("r") as conf:
+        with default_path.open('r') as conf:
             pyrallis.cfgparsing.load(MainConfig, conf)

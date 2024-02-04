@@ -1,44 +1,31 @@
 # -*-coding:utf-8-*-
-from doctest import debug
-import pyrallis
-import torch
-from torch.autograd import grad
-import os
+import csv
+import logging
 import math
+import os
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pyrallis
+import rich.progress as prog
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import numpy as np
-from tqdm import tqdm
-import csv
-import gc
-import yaml
-import logging
-import warnings
-import csv
-
-import pandas as pd
-import numpy as np
-import torch
-from torch.utils.data import Dataset, DataLoader
-from torch.utils.data import DataLoader, random_split, Subset, ConcatDataset
-import os
-from datetime import datetime
-
-import rich.progress as prog
-
-from pathlib import Path
-from einops import einsum, rearrange, reduce
 from config import MainConfig, SALConfig
-from utils import debug_cuda, debug_shapes, to_np
+from einops import einsum, reduce
+from torch.autograd import grad
+from torch.utils.data import DataLoader, Dataset, Subset
+from utils import debug_shapes, sizeof_fmt, to_np
 
-config = pyrallis.parse(MainConfig, "configs/defaults.toml")
+config = pyrallis.parse(MainConfig, 'configs/defaults.toml')
 
 config.cli.set_up_logging()
 
 torch.autograd.set_detect_anomaly(True)
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
-device = "cuda" if torch.cuda.is_available() else "cpu"
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 
 def create_folder_based_on_time(base_path: os.PathLike):
@@ -46,17 +33,17 @@ def create_folder_based_on_time(base_path: os.PathLike):
     # Get the current time
     current_time = datetime.now()
 
-    time_str = current_time.strftime("%m-%d-%H-%M")
+    time_str = current_time.strftime('%m-%d-%H-%M')
     if config.smoke_test:
-        time_str = "smoke-test"
+        time_str = 'smoke-test'
 
     # Create a folder name based on the formatted time
-    folder_name = base_path / f"{config.target.col_name}_{time_str}"
+    folder_name = base_path / f'{config.target.col_name}_{time_str}'
 
-    for subfolder in ("adv", "models", "sorted"):
+    for subfolder in ('adv', 'models', 'sorted'):
         os.makedirs(folder_name / subfolder, exist_ok=True)
 
-    with (folder_name / "run_params.toml").open("w") as configfile:
+    with (folder_name / 'run_params.toml').open('w') as configfile:
         pyrallis.dump(config, configfile)
 
     return folder_name
@@ -65,111 +52,10 @@ def create_folder_based_on_time(base_path: os.PathLike):
 exp_dir = create_folder_based_on_time(Path.cwd() / config.log.exp_base_dir)
 
 
-# # Step 1: Load the CSV file
-# inputdataset =pd.read_feather('./nom_dataset_pred.feather')
-# #excluded = ["comp",'delta_e', 'bandgap']
-# feature_used_columns = inputdataset.columns[:inputdataset.columns.get_loc('TSNE_x')]
-# lables = inputdataset.columns[inputdataset.columns.get_loc('Xshift_tsne'):]
-
-# config_dict['dim_x']=len(inputdataset.columns[1:inputdataset.columns.get_loc('bandgap')])
-
-
-# Xshift_tsne     =inputdataset.loc[inputdataset['Xshift_tsne'    ]==1][feature_used_columns]
-# Xshift_umap     =inputdataset.loc[inputdataset['Xshift_umap'    ]==1][feature_used_columns]
-# statY_delta_e   =inputdataset.loc[inputdataset['statY_delta_e'  ]==1][feature_used_columns]
-# infoY_delta_e   =inputdataset.loc[inputdataset['infoY_delta_e'  ]==1][feature_used_columns]
-# statY_bandgap   =inputdataset.loc[inputdataset['statY_bandgap'  ]==1][feature_used_columns]
-# infoY_bandgap   =inputdataset.loc[inputdataset['infoY_bandgap'  ]==1][feature_used_columns]
-# inRand1         =inputdataset.loc[inputdataset['inRand1'        ]==1][feature_used_columns]
-# inRand2         =inputdataset.loc[inputdataset['inRand2'        ]==1][feature_used_columns]
-# inRand3         =inputdataset.loc[inputdataset['inRand3'        ]==1][feature_used_columns]
-# inRand4         =inputdataset.loc[inputdataset['inRand4'        ]==1][feature_used_columns]
-# inRand5         =inputdataset.loc[inputdataset['inRand5'        ]==1][feature_used_columns]
-# inPizoe         =inputdataset.loc[inputdataset['inPizoe'        ]==1][feature_used_columns]
-
-
-# training_set = inputdataset[(inputdataset[lables] == 0).all(axis=1)][feature_used_columns]
-
-
-# # Step 3: Define a custom PyTorch Dataset class
-# class MyDataset(Dataset):
-#     def __init__(self, df):
-#         self.inputs = df.drop(columns=['delta_e','comp','bandgap']).values
-#         self.labels = df['delta_e'].values
-
-#     def __len__(self):
-#         return len(self.inputs)
-
-#     def __getitem__(self, index):
-#         input = self.inputs[index].tolist()[:]
-#         label = self.labels[index].tolist()
-#         return torch.tensor(input, dtype=torch.float32), torch.tensor(label, dtype=torch.float32)
-#     def getSALdata(self):
-#         input = np.array(self.inputs[:].tolist())
-#         label = np.array(self.labels[:].tolist())
-#         return (input, label)
-
-# class RecurrentDataset(Dataset):
-#     def __init__(self, df):
-#         self.inputs = df['data'].values
-#         self.labels = df['label'].values
-
-#     def __len__(self):
-#         return len(self.inputs)
-
-#     def __getitem__(self, index):
-#         input = self.inputs[index].tolist()[:]
-#         label = self.labels[index].tolist()
-#         return torch.tensor(input, dtype=torch.float32), torch.tensor(label, dtype=torch.float32)
-
-
-# # Step 4: Use DataLoader to create batches
-# batch_size = config.data.batch_size
-
-# train_dataset = MyDataset(training_set)
-# train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,drop_last=True)
-
-
-# Xshift_tsne_loader      =DataLoader(MyDataset(Xshift_tsne  ),batch_size=len(Xshift_tsne  ))
-# Xshift_umap_loader      =DataLoader(MyDataset(Xshift_umap  ),batch_size=len(Xshift_umap  ))
-# statY_delta_e_loader    =DataLoader(MyDataset(statY_delta_e),batch_size=len(statY_delta_e))
-# infoY_delta_e_loader    =DataLoader(MyDataset(infoY_delta_e),batch_size=len(infoY_delta_e))
-# statY_bandgap_loader    =DataLoader(MyDataset(statY_bandgap),batch_size=len(statY_bandgap))
-# infoY_bandgap_loader    =DataLoader(MyDataset(infoY_bandgap),batch_size=len(infoY_bandgap))
-# Rsplt_testset1_loader   =DataLoader(MyDataset(inRand1      ),batch_size=len(inRand1      ))
-# Rsplt_testset2_loader   =DataLoader(MyDataset(inRand2      ),batch_size=len(inRand2      ))
-# Rsplt_testset3_loader   =DataLoader(MyDataset(inRand3      ),batch_size=len(inRand3      ))
-# Rsplt_testset4_loader   =DataLoader(MyDataset(inRand4      ),batch_size=len(inRand4      ))
-# Rsplt_testset5_loader   =DataLoader(MyDataset(inRand5      ),batch_size=len(inRand5      ))
-# piezo_test_loader       =DataLoader(MyDataset(inPizoe      ),batch_size=len(inPizoe      ))
-
-
-# data=train_dataset.getSALdata()
-
-
-# Step 1: Load the CSV file
-
-Rsplt_testset = pd.read_csv("./dataset/Rsplt_testset.csv", index_col=None)
-Xshft_testset = pd.read_csv("./dataset/Xshft_testset.csv", index_col=None)
-piezo_testset = pd.read_csv("./dataset/piezo_testset.csv", index_col=None)
-statY_testset = pd.read_csv("./dataset/statY_testset.csv", index_col=None)
-infoY_testset = pd.read_csv("./dataset/infoY_testset.csv", index_col=None)
-final_train = pd.read_csv("./dataset/final_trainset.csv", index_col=None)
-
-Rsplt_testset1 = pd.read_csv("./dataset/Rsplt_testset1.csv", index_col=None)
-Rsplt_testset2 = pd.read_csv("./dataset/Rsplt_testset2.csv", index_col=None)
-Rsplt_testset3 = pd.read_csv("./dataset/Rsplt_testset3.csv", index_col=None)
-Rsplt_testset4 = pd.read_csv("./dataset/Rsplt_testset4.csv", index_col=None)
-Rsplt_testset5 = pd.read_csv("./dataset/Rsplt_testset5.csv", index_col=None)
-
-
-# Step 3: Define a custom PyTorch Dataset class
 class MyDataset(Dataset):
     def __init__(self, df):
-        self.inputs = df.drop(columns=["delta_e", "pretty_comp"]).values.astype(
-            np.float32
-        )
-        self.labels = df["delta_e"].values.astype(np.float32)
+        self.inputs = df.drop(columns=['delta_e', 'pretty_comp']).values.astype(np.float32)
+        self.labels = df['delta_e'].values.astype(np.float32)
         if config.smoke_test:
             self.inputs = self.inputs[:47]
             self.labels = self.labels[:47]
@@ -196,8 +82,8 @@ class MyDataset(Dataset):
 
 class RecurrentDataset(Dataset):
     def __init__(self, df):
-        self.inputs = df["data"].values
-        self.labels = df["label"].values
+        self.inputs = df['data'].values
+        self.labels = df['label'].values
 
     def __len__(self):
         return len(self.inputs)
@@ -218,46 +104,32 @@ class RecurrentDataset(Dataset):
 # Step 4: Use DataLoader to create batches
 batch_size = config.data.batch_size
 
+final_train = pd.read_csv('./dataset/final_trainset.csv', index_col=None)
+
 train_dataset = MyDataset(final_train)
-train_loader = DataLoader(
-    train_dataset, batch_size=batch_size, shuffle=True, drop_last=True
-)
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
 
+data_set_names = [f'Rsplt{i}' for i in range(1, 6)] + [
+    'piezo',
+    'Rsplt',
+    'Xshft',
+    'statY',
+    'infoY',
+]
 
-Rsplt_test_dataset = MyDataset(Rsplt_testset)
-Xshft_test_dataset = MyDataset(Xshft_testset)
-piezo_test_dataset = MyDataset(piezo_testset)
-statY_test_dataset = MyDataset(statY_testset)
-infoY_test_dataset = MyDataset(infoY_testset)
+data_sets = {}
 
-Rsplt_testset1_dataset = MyDataset(Rsplt_testset1)
-Rsplt_testset2_dataset = MyDataset(Rsplt_testset2)
-Rsplt_testset3_dataset = MyDataset(Rsplt_testset3)
-Rsplt_testset4_dataset = MyDataset(Rsplt_testset4)
-Rsplt_testset5_dataset = MyDataset(Rsplt_testset5)
+for name in data_set_names:
+    if name.endswith(tuple('0123456789')):
+        prefix, suffix = name[:-1], name[-1]
+        file_name = f'{prefix}_testset{suffix}.csv'
+    else:
+        file_name = f'{name}_testset.csv'
 
-Rsplt_testset1_loader = DataLoader(
-    Rsplt_testset1_dataset, batch_size=len(Rsplt_testset1)
-)
-Rsplt_testset2_loader = DataLoader(
-    Rsplt_testset2_dataset, batch_size=len(Rsplt_testset2)
-)
-Rsplt_testset3_loader = DataLoader(
-    Rsplt_testset3_dataset, batch_size=len(Rsplt_testset3)
-)
-Rsplt_testset4_loader = DataLoader(
-    Rsplt_testset4_dataset, batch_size=len(Rsplt_testset4)
-)
-Rsplt_testset5_loader = DataLoader(
-    Rsplt_testset5_dataset, batch_size=len(Rsplt_testset5)
-)
-
-Rsplt_test_loader = DataLoader(Rsplt_test_dataset, batch_size=len(Rsplt_testset))
-Xshft_test_loader = DataLoader(Xshft_test_dataset, batch_size=len(Xshft_testset))
-piezo_test_loader = DataLoader(piezo_test_dataset, batch_size=len(piezo_testset))
-statY_test_loader = DataLoader(statY_test_dataset, batch_size=len(statY_testset))
-infoY_test_loader = DataLoader(infoY_test_dataset, batch_size=len(infoY_testset))
-
+    csv = pd.read_csv(Path('dataset/') / file_name, index_col=None)
+    dataset = MyDataset(csv)
+    loader = DataLoader(dataset, batch_size=len(dataset))
+    data_sets[name] = (dataset, loader)
 
 data = train_dataset.getSALdata()
 
@@ -279,55 +151,53 @@ def sample_and_remove_from_testset(test_dataloader, num_samples=config.data.batc
 
     # Step 3: Create a DataLoader with the sampled test batch
     sampled_test_dataset = Subset(test_dataset, sampled_indices)
-    sampled_test_dataloader = DataLoader(
-        sampled_test_dataset, batch_size=num_samples, shuffle=True
-    )
+    sampled_test_dataloader = DataLoader(sampled_test_dataset, batch_size=num_samples, shuffle=True)
 
     # Step 4: Create a DataLoader with the remaining test set (excluding the sampled indices)
-    remaining_indices = [
-        i for i in range(len(test_dataset)) if i not in sampled_indices
-    ]
+    remaining_indices = [i for i in range(len(test_dataset)) if i not in sampled_indices]
     remaining_test_dataset = Subset(test_dataset, remaining_indices)
     remaining_test_dataloader = DataLoader(
         remaining_test_dataset, batch_size=len(remaining_test_dataset), shuffle=True
     )
 
     # Step 5: Print the lengths of the original test set, sampled test set, and remaining test set
-    logging.debug(f"Original Test Set Size: {len(test_dataset)}")
-    logging.debug(f"Sampled Test Set Size: {len(sampled_test_dataloader.dataset)}")
-    logging.debug(f"Remaining Test Set Size: {len(remaining_test_dataloader.dataset)}")
+    logging.debug(f'Original Test Set Size: {len(test_dataset)}')
+    logging.debug(f'Sampled Test Set Size: {len(sampled_test_dataloader.dataset)}')
+    logging.debug(f'Remaining Test Set Size: {len(remaining_test_dataloader.dataset)}')
 
     return sampled_test_dataloader, remaining_test_dataloader
 
 
-piezo_adv_loader, piezo1_test_loader = sample_and_remove_from_testset(piezo_test_loader)
+piezo_adv_loader, piezo1_test_loader = sample_and_remove_from_testset(data_sets['piezo'][1])
 
 
-with open("feat_col_name.txt", "r") as file:
+with open('feat_col_name.txt', 'r') as file:
     column_names = file.read().split()
 
 
 # column_names = feature_used_columns
 def save_tensor(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
+    import csv
+
     ori_data_list = ori_data.clone().cpu().numpy()
     ori_labels_list = ori_lab.clone().cpu().numpy()
     adv_data_list = adv_data.clone().cpu().numpy()
     adv_labels_list = adv_lab.clone().cpu().tolist()
 
-    csv_filename = exp_dir / "adv" / f"adv_data_labels_in_attack{epoch}_{batch_idx}.csv"
+    csv_filename = exp_dir / 'adv' / f'adv_data_labels_in_attack{epoch}_{batch_idx}.csv'
 
-    with open(csv_filename, "w", newline="") as csvfile:
+    with open(csv_filename, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
 
         # Write header
-        header = column_names + [
-            "label"
-        ]  # [f'feature_{i}' for i in range(ori_data_list.shape[1])]
+        header = column_names + ['label']  # [f'feature_{i}' for i in range(ori_data_list.shape[1])]
         writer.writerow(header)
 
         # Write data and labels for each group
         rows_group1 = np.column_stack((ori_data_list, ori_labels_list))
-        rows_group2 = np.column_stack((adv_data_list, ori_labels_list))
+        # TODO this was a typo?
+        # rows_group2 = np.column_stack((adv_data_list, ori_labels_list))
+        rows_group2 = np.column_stack((adv_data_list, adv_labels_list))
 
         # Combine data from the first two groups only
         all_rows = np.vstack((rows_group1, rows_group2))
@@ -381,57 +251,32 @@ class IRNet_intorch(torch.nn.Module):
         return x
 
 
-train_best_loss = float("inf")
-partial_train_best_loss = float("inf")
+train_best_loss = float('inf')
+partial_train_best_loss = float('inf')
 
-Rsplt_ave_best_loss = float("inf")
-
-# Xshift_tsne_best_loss = float('inf')
-# Xshift_umap_best_loss = float('inf')
-# statY_delta_e_best_loss = float('inf')
-# infoY_delta_e_best_loss = float('inf')
-# statY_bandgap_best_loss = float('inf')
-# infoY_bandgap_best_loss = float('inf')
-# Rsplt_testset1_best_loss = float('inf')
-# Rsplt_testset2_best_loss = float('inf')
-# Rsplt_testset3_best_loss = float('inf')
-# Rsplt_testset4_best_loss = float('inf')
-# Rsplt_testset5_best_loss = float('inf')
-# piezo_test_best_loss = float('inf')
-
+Rsplt_ave_best_loss = float('inf')
 loss_df = pd.DataFrame(
     columns=[
-        "epoch",
-        "train",
-        "partialtrain",
-        "Xshift_tsne",
-        "Xshift_umap",
-        "statY_delta_e",
-        "infoY_delta_e",
-        "statY_bandgap",
-        "infoY_bandgap",
-        "inRand1",
-        "inRand2",
-        "inRand3",
-        "inRand4",
-        "inRand5",
-        "inPizoe",
-        "RspltAVE",
-        "save",
-        "attack_gamma",
+        'epoch',
+        'train',
+        'partialtrain',
+        'Xshift_tsne',
+        'Xshift_umap',
+        'statY_delta_e',
+        'infoY_delta_e',
+        'statY_bandgap',
+        'infoY_bandgap',
+        'inRand1',
+        'inRand2',
+        'inRand3',
+        'inRand4',
+        'inRand5',
+        'inPizoe',
+        'RspltAVE',
+        'save',
+        'attack_gamma',
     ]
 )
-
-
-def pretty(vector):
-    if type(vector) is list:
-        vlist = vector
-    elif type(vector) is np.ndarray:
-        vlist = vector.reshape(-1).tolist()
-    else:
-        vlist = vector.view(-1).tolist()
-
-    return "[" + ", ".join("{:+.4f}".format(vi) for vi in vlist) + "]"
 
 
 # Optimizer Class to maximize loss of adversarial dataset
@@ -574,9 +419,7 @@ class StableAL:
         # For __ Theta self.conf.theta_epochs
         for i_theta in range(self.conf.theta_epochs):
             if i_theta % self.conf.adv_reset_epochs == 0 or not end_flag:
-                images_adv, labels = self.attack(
-                    gamma, data, epoch=epoch, batch_idx=batch_idx
-                )
+                images_adv, labels = self.attack(gamma, data, epoch=epoch, batch_idx=batch_idx)
 
             else:
                 self.adv_again = self.adversarial_data
@@ -604,7 +447,7 @@ class StableAL:
             assert self.conf.grad_layer in nuisance_params
             grad_param = nuisance_params.pop(self.conf.grad_layer)
 
-            from torch.func import vmap, jacfwd, grad as funcgrad
+            from torch.func import jacfwd
 
             # debug_shapes("images_adv", "labels", **nuisance_params)
 
@@ -623,7 +466,7 @@ class StableAL:
 
             dtheta_dx = d2l_th_x(grad_param, images_adv, labels, nuisance_params)
 
-            dtheta_dx = reduce(dtheta_dx, "l1 l2 batch dim_x -> l1 l2 dim_x", "sum")
+            dtheta_dx = reduce(dtheta_dx, 'l1 l2 batch dim_x -> l1 l2 dim_x', 'sum')
 
             self.xa_grad = 0 if self.xa_grad is None else self.xa_grad
             self.xa_grad += dtheta_dx
@@ -646,9 +489,7 @@ class StableAL:
         # For __ Theta self.conf.theta_epochs
         for i_theta in range(self.conf.theta_epochs):
             if i_theta % self.conf.adv_reset_epochs == 0 or not end_flag:
-                images_adv, labels = self.attack(
-                    gamma, data, epoch=epoch, batch_idx=batch_idx
-                )
+                images_adv, labels = self.attack(gamma, data, epoch=epoch, batch_idx=batch_idx)
 
             else:
                 self.adv_again = self.adversarial_data
@@ -667,15 +508,11 @@ class StableAL:
             loss = self.loss_criterion(outputs, labels.float())
 
             dtheta_dx = []
-            dloss_dtheta = grad(loss, self.model.parameters(), create_graph=True)[
-                4
-            ].reshape(-1)
+            dloss_dtheta = grad(loss, self.model.parameters(), create_graph=True)[4].reshape(-1)
 
             for j in range(dloss_dtheta.shape[0]):
                 # print(f"dloss_dtheta.shape[0]:j     {j}")
-                dtheta_dx.append(
-                    grad(dloss_dtheta[j], images_adv, create_graph=True)[0].detach()
-                )
+                dtheta_dx.append(grad(dloss_dtheta[j], images_adv, create_graph=True)[0].detach())
 
             if self.xa_grad is None:
                 self.xa_grad = 0
@@ -699,9 +536,7 @@ class StableAL:
             epoch,
             batch_idx,
         )
-        rtheta = method.r(
-            [[data, target]], alpha=self.conf.alpha / math.sqrt(epoch + 1)
-        )
+        rtheta = method.r([[data, target]], alpha=self.conf.alpha / math.sqrt(epoch + 1))
         method.theta_grad = grad(
             rtheta, list(self.model.parameters()), create_graph=True, allow_unused=True
         )
@@ -712,12 +547,11 @@ class StableAL:
         deltaw[zero_list] = 0.0
         max_grad = torch.max(torch.abs(deltaw))
         deltastep = self.conf.deltaall
+        # TODO what's going on here?
         lr_weight = (deltastep / max_grad).detach()
-        print(f"RLoss: {rtheta.data}")
+        print(f'RLoss: {rtheta.data}')
 
-    def adv_step_new(
-        self, model, data, target, attack_gamma, end_flag, epoch, batch_idx
-    ):
+    def adv_step_new(self, model, data, target, attack_gamma, end_flag, epoch, batch_idx):
         # TODO split this from adv_target and adv_data
         self.train_theta(
             model,
@@ -746,7 +580,7 @@ class StableAL:
             self.theta_grad,
             self.xa_grad,
             self.weight_grad,
-            "l1 l2, l1 l2 dim_x, b dim_x -> dim_x",
+            'l1 l2, l1 l2 dim_x, b dim_x -> dim_x',
         )
         deltaw *= -1
 
@@ -754,7 +588,7 @@ class StableAL:
         max_grad = torch.max(torch.abs(deltaw))
         deltastep = self.conf.deltaall
         lr_weight = (deltastep / max_grad).detach()
-        logging.debug(f"RLoss: {rtheta.data}")
+        logging.debug(f'RLoss: {rtheta.data}')
 
         self.weights -= lr_weight * deltaw.detach().reshape(self.weights.shape)
 
@@ -784,9 +618,9 @@ all_loss_dict = {}
 
 
 with prog.Progress(
-    prog.TextColumn("[progress.description]{task.description}"),
-    prog.TextColumn("Loss: {task.fields[annot_val]}"),
-    prog.BarColumn(80, "light_pink3", "deep_sky_blue4", "green"),
+    prog.TextColumn('[progress.description]{task.description}'),
+    prog.TextColumn('Loss: {task.fields[annot_val]}'),
+    prog.BarColumn(80, 'light_pink3', 'deep_sky_blue4', 'green'),
     prog.MofNCompleteColumn(),
     prog.TimeElapsedColumn(),
     prog.TimeRemainingColumn(),
@@ -795,48 +629,23 @@ with prog.Progress(
     disable=not config.cli.show_progress,
 ) as progress:
     partial_losses = progress.add_task(
-        "[deep_pink3] Partial [/deep_pink3]",
+        '[deep_pink3] Partial [/deep_pink3]',
         total=config.max_epochs,
-        annot_val=" ",
+        annot_val=' ',
     )
-    network_losses = progress.add_task(
-        "Training", total=config.max_epochs, annot_val=" "
-    )
-    # progress.update(total_epochs, advance=1, annot_name="partial_loss", annot_val="")
+    network_losses = progress.add_task('Training', total=config.max_epochs, annot_val=' ')
 
     for epoch in range(config.max_epochs):
         train_loss = 0.0
-
-        # Xshift_tsne_mse_loss = 0
-        # Xshift_umap_mse_loss = 0
-        # statY_delta_e_mse_loss = 0
-        # infoY_delta_e_mse_loss = 0
-        # statY_bandgap_mse_loss = 0
-        # infoY_bandgap_mse_loss = 0
-        # Rsplt_testset1_mse_loss = 0
-        # Rsplt_testset2_mse_loss = 0
-        # Rsplt_testset3_mse_loss = 0
-        # Rsplt_testset4_mse_loss = 0
-        # Rsplt_testset5_mse_loss = 0
-        # piezo_test_mse_loss = 0
 
         partial_train_loss = 0.0
         total_train_loss = 0.0
 
         minima = []
 
-        def sizeof_fmt(num, suffix="B"):
-            for unit in ("", "Ki", "Mi", "Gi", "Ti", "Pi", "Ei", "Zi"):
-                if abs(num) < 1024.0:
-                    return f"{num:3.1f}{unit}{suffix}"
-                num /= 1024.0
-            return f"{num:.1f}Yi{suffix}"
-
         for batch_idx, (data, target) in enumerate(train_loader):
             # logging.debug(f"current in epoch    {epoch}      batch {batch_idx}")
-            logging.debug(
-                f"CUDA allocated: {sizeof_fmt(torch.cuda.memory_allocated())}"
-            )
+            logging.debug(f'CUDA allocated: {sizeof_fmt(torch.cuda.memory_allocated())}')
 
             # Zero the gradients
             optimizer.zero_grad()
@@ -868,38 +677,29 @@ with prog.Progress(
         progress.update(
             partial_losses,
             advance=1,
-            annot_val=f"{partial_train_loss:.4f}",
+            annot_val=f'{partial_train_loss:.4f}',
         )
 
         if epoch % config.partial.epochs_between_regens == 0:
             with torch.no_grad():
-                logging.debug("sorting training set")
+                logging.debug('sorting training set')
                 # for sorting Training set
                 sort_MAE = []
                 method.model.eval()
                 for i, (x, y) in enumerate(train_dataset):
-                    # inp = train_dataset.inputs[i]
-                    # tar = train_dataset.labels[i]
-                    # x = torch.tensor([inp.tolist()], dtype=torch.float32).to(device)
-                    # y = torch.tensor(tar.tolist(), dtype=torch.float32).to(device)
-
                     output = method.model(x.unsqueeze(0))
                     loss = config.loss_criterion(output, y.unsqueeze(0)).cpu()
                     # Accumulate the training loss
                     train_loss += loss.item()
                     # logging.debug(f"loss:       {loss}")
-                    sort_MAE.append(
-                        {"data": to_np(x), "label": to_np(y), "loss": loss.item()}
-                    )
+                    sort_MAE.append({'data': to_np(x), 'label': to_np(y), 'loss': loss.item()})
 
                 if epoch % config.partial_epoch_save == 0:
                     sort_MAE = pd.DataFrame(sort_MAE)
-                    sort_MAE.to_csv(
-                        exp_dir / "sorted/train_set_sorting_{epoch}.csv", index=False
-                    )
+                    sort_MAE.to_csv(exp_dir / 'sorted/train_set_sorting_{epoch}.csv', index=False)
 
                 sort_MAE = pd.DataFrame(sort_MAE)
-                new_train = sort_MAE.sort_values(by=["loss"], ascending=False)
+                new_train = sort_MAE.sort_values(by=['loss'], ascending=False)
                 new_train_dataset = RecurrentDataset(new_train)
                 train_loader = DataLoader(
                     new_train_dataset,
@@ -910,9 +710,9 @@ with prog.Progress(
 
                 train_loss /= len(train_dataset.inputs)
                 logging.debug(
-                    f"Epoch {epoch+1}/{config.max_epochs} - Training loss: {train_loss:.4f} "
+                    f'Epoch {epoch+1}/{config.max_epochs} - Training loss: {train_loss:.4f} '
                 )
-                logging.debug("==" * 20)
+                logging.debug('==' * 20)
 
         losses_dict = {}
 
@@ -925,11 +725,11 @@ with prog.Progress(
         progress.update(
             network_losses,
             advance=1,
-            annot_val=f"{train_loss:.4f}",
+            annot_val=f'{train_loss:.4f}',
         )
 
-        losses_dict["Train"] = train_loss
-        losses_dict["Partial_train"] = partial_train_loss
+        losses_dict['Train'] = train_loss
+        losses_dict['Partial_train'] = partial_train_loss
 
         def calculate_loss(data_loader, model, criterion):
             mean_loss = 0.0
@@ -943,44 +743,20 @@ with prog.Progress(
             mean_loss /= total_batches
             return mean_loss
 
-        data_loaders = {
-            # 'Xshift_tsne': Xshift_tsne_loader, 'Xshift_umap': Xshift_umap_loader,
-            # 'statY_delta_e': statY_delta_e_loader, 'infoY_delta_e': infoY_delta_e_loader,
-            # 'statY_bandgap': statY_bandgap_loader, 'infoY_bandgap': infoY_bandgap_loader,
-            "Rsplt_testset1": Rsplt_testset1_loader,
-            "Rsplt_testset2": Rsplt_testset2_loader,
-            "Rsplt_testset3": Rsplt_testset3_loader,
-            "Rsplt_testset4": Rsplt_testset4_loader,
-            "Rsplt_testset5": Rsplt_testset5_loader,
-            "piezo_test": piezo1_test_loader,
-        }
+        rsplts = [f'Rsplt{i}' for i in range(1, 6)]
+        others = config.data.log_loaders
 
-        # Iterate over each data loader and calculate MSE loss
-        for dataset_name, loader in data_loaders.items():
-            loader_mse_loss = calculate_loss(
-                loader, method.model, config.loss_criterion
-            )
-            # Append the MSE loss to the list in the dictionary
+        for dataset_name in rsplts + list(others):
+            (_dataset, loader) = data_sets[dataset_name]
+            loader_mse_loss = calculate_loss(loader, method.model, config.loss_criterion)
             losses_dict[dataset_name] = loader_mse_loss
 
-        rsplt_ave = np.average(
-            [
-                losses_dict["Rsplt_testset1"],
-                losses_dict["Rsplt_testset2"],
-                losses_dict["Rsplt_testset3"],
-                losses_dict["Rsplt_testset4"],
-                losses_dict["Rsplt_testset5"],
-            ]
-        )
-        losses_dict["rsplt_ave"] = rsplt_ave
+        losses_dict['rsplt_ave'] = np.average([losses_dict[rsplt] for rsplt in rsplts])
 
         save = []
         # Separate loop to update the best loss for all datasets
         for dataset_name, loss in losses_dict.items():
-            if (
-                dataset_name not in best_loss_dict
-                or loader_mse_loss < best_loss_dict[dataset_name]
-            ):
+            if dataset_name not in best_loss_dict or loader_mse_loss < best_loss_dict[dataset_name]:
                 best_loss_dict[dataset_name] = loader_mse_loss
                 save.append(dataset_name)
 
@@ -988,37 +764,35 @@ with prog.Progress(
         if train_loss < train_best_loss:
             train_best_loss = train_loss
             counter = 0
-            torch.save(method.model, exp_dir / f"models/IR3_epoch_{epoch}.pt")
+            torch.save(method.model, exp_dir / f'models/IR3_epoch_{epoch}.pt')
             torch.save(
                 method.weights,
-                exp_dir / "models/SAL_weight_{epoch}_gamma_{attack_gamma}.pt",
+                exp_dir / 'models/SAL_weight_{epoch}_gamma_{attack_gamma}.pt',
             )
-            save.append("Train")
+            save.append('Train')
         else:
             counter += 1
-            logging.debug(f"Training Loss has not improved for {counter} epochs.")
+            logging.debug(f'Training Loss has not improved for {counter} epochs.')
 
-        if rsplt_ave < Rsplt_ave_best_loss:
-            Rsplt_ave_best_loss = rsplt_ave
+        if losses_dict['rsplt_ave'] < Rsplt_ave_best_loss:
+            Rsplt_ave_best_loss = losses_dict['rsplt_ave']
             counter_val = 0
-            torch.save(
-                method.model, exp_dir / "models/IR3_SAL-bset-Rsplt_test_mse_loss.pt"
-            )
-            save.append("Rsplt_AVE")
+            torch.save(method.model, exp_dir / 'models/IR3_SAL-bset-Rsplt_test_mse_loss.pt')
+            save.append('Rsplt_AVE')
         else:
             counter_val += 1
             if counter_val >= config.early_stop:
                 logging.info(
-                    f"Training stopped. Valid (rand) Loss has not improved for {config.early_stop} epochs."
+                    f'Training stopped. Valid (rand) Loss has not improved for {config.early_stop} epochs.'
                 )
                 break
 
         all_loss_dict[epoch + 1] = losses_dict
 
-        mse_losses_df = pd.DataFrame.from_dict(all_loss_dict, orient="index")
+        mse_losses_df = pd.DataFrame.from_dict(all_loss_dict, orient='index')
 
-        mse_losses_df.reset_index().rename(columns={"index": "epoch"}).to_feather(
-            exp_dir / "SAL-training_loss.feather"
+        mse_losses_df.reset_index().rename(columns={'index': 'epoch'}).to_feather(
+            exp_dir / 'SAL-training_loss.feather'
         )
 
         # adjust gamma according to min(weight)
@@ -1035,5 +809,5 @@ with prog.Progress(
             continue
 
 
-torch.save(method.weights, exp_dir / f"Whole_SAL_{epoch}.pt")
-torch.save(method.model, exp_dir / f"IR3_epoch_{epoch}.pt")
+torch.save(method.weights, exp_dir / f'Whole_SAL_{epoch}.pt')
+torch.save(method.model, exp_dir / f'IR3_epoch_{epoch}.pt')
