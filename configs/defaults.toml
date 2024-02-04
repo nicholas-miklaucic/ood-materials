@@ -1,0 +1,36 @@
+smoke_test = false
+pre_adv_epochs = 4
+early_stop = 500
+max_epochs = 1000
+network_lr = 0.01
+network_loss = "mse"
+
+[partial]
+epochs_between_regens = 5
+partial_batch = 5
+
+[log]
+partial_regens_per_log = 10
+exp_base_dir = "exps"
+
+[sal]
+target_loss = "mse"
+xa_grad_reduce = 0.01
+deltaall = 20
+alpha = 0.5
+attack_lr = 0.07
+attack_epochs = 2
+theta_lr = 0.01
+theta_epochs = 10
+adv_reset_epochs = 5
+grad_layer = "fc16.weight"
+
+[target]
+col_name = "delta_e"
+
+[data]
+batch_size = 128
+
+[cli]
+verbosity = "info"
+show_progress = true

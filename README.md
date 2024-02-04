@@ -1,0 +1,3 @@
+- Figure out how to avoid CUDA OOM
+- Is problem that we're storing full jacobian?
+- Figure out what's happening with gradients and flowchart
