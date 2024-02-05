@@ -187,7 +187,13 @@ def sample_and_remove_from_testset(test_dataloader, num_samples=config.data.batc
     return sampled_test_dataloader, remaining_test_dataloader
 
 
-piezo_adv_loader, piezo1_test_loader = sample_and_remove_from_testset(test_sets['piezo'][1])
+if config.adv_train_data is None:
+    adv_loader = None
+else:
+    test_data, test_loader = test_sets[config.adv_train_data]
+    adv_loader, remaining_loader = sample_and_remove_from_testset(test_loader)
+
+    test_sets[config.adv_train_data] = (test_data, remaining_loader)
 
 
 def save_tensor(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
@@ -617,8 +623,6 @@ logging.debug(config.model.show_grad_layers(model))
 
 method = StableAL(model, train_dataset.dim_x, config.sal)
 
-adv_data, adv_target = next(iter(piezo_adv_loader))
-
 
 # warnings.filterwarnings("ignore")
 
@@ -672,11 +676,10 @@ with prog.Progress(
             if epoch < config.pre_adv_epochs:
                 continue
 
-            if config.adv_train_data is None:
+            if adv_loader is None:
                 adv_data, adv_target = data, target
             else:
-                ds, loader = test_sets[config.adv_train_data]
-                adv_data, adv_target = next(iter(loader))
+                adv_data, adv_target = next(iter(adv_loader))
             method.adv_step_new(adv_data, adv_target, end_flag, epoch, batch_idx)
 
             if config.cli.show_cuda_memory:

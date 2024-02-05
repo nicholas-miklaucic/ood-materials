@@ -15,16 +15,12 @@ python src/train.py --smoke_test=True --cli.verbosity debug
 Every `TODO` is something we need to look at.
 
 Other things that are planned:
- - Config support for changing out datasets, using the splits I made
  - Replacing `Adam` with `AdamW` or equivalent
- - Deal with problem where r doesn't work well with one environment
  - Find good learning rates
  - LR scheduling
  - Config support for changing what datasets get passed to the adversarial data
  - The way the weights work seems....suboptimal
  - It does seem like training loss is getting better, what's up with the stopping criterion?
- - update code to use splits and feather file
- - split in training set, look at test sets
 
 
 - Citation/methodology for sample weights
