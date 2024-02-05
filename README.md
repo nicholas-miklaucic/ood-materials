@@ -16,6 +16,10 @@ Every `TODO` is something we need to look at.
 
 Other things that are planned:
  - Config support for changing out datasets, using the splits I made
- - Replacing `Adam` with `AdamW`
+ - Replacing `Adam` with `AdamW` or equivalent
+ - Deal with problem where r doesn't work well with one environment
+ - Find good learning rates
  - LR scheduling
  - Config support for changing what datasets get passed to the adversarial data
+ - The way the weights work seems....suboptimal
+ - It does seem like training loss is getting better, what's up with the stopping criterion?

@@ -4,6 +4,7 @@ from enum import Enum
 from pathlib import Path
 from pprint import pprint
 from typing import Optional
+import typing
 import pandas as pd
 
 import pyrallis
@@ -154,6 +155,9 @@ class LogConfig:
 
     # Whether to log adversarial data.
     log_adv_data: bool = True
+
+    # Name of experiment. If None, use time.
+    exp_name: typing.Optional[str] = None
 
 
 class LoggingLevel(Enum):
