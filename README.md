@@ -17,3 +17,5 @@ Every `TODO` is something we need to look at.
 Other things that are planned:
  - Config support for changing out datasets, using the splits I made
  - Replacing `Adam` with `AdamW`
+ - LR scheduling
+ - Config support for changing what datasets get passed to the adversarial data

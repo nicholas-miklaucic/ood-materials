@@ -441,19 +441,38 @@ class StableAL:
     # Loss across Training environments
     # Self.loss_criterion = MSELoss
     def r(self, environments, alpha=None):
-        result = 0.0
+        # env_loss = torch.empty(
+        #     len(environments),
+        #     device=device,
+        #     dtype=torch.float32,
+        # )
+        # for i, (x_e, y_e) in enumerate(environments):
+        #     x_e = x_e.to(device)
+        #     y_e = y_e.to(torch.float32).to(device)
+        #     env_loss[i] = self.loss_criterion(self.model(x_e), y_e)
+
+        # max_index = torch.argmax(env_loss)
+        # min_index = torch.argmin(env_loss)
+
+        # env_loss[max_index] *= 1 + alpha
+        # env_loss[min_index] *= 1 - alpha
+        # result = torch.sum(env_loss)
+        # return result
+
+        # TODO The reason the below original code is different is because of the elif. When only one
+        # environment is passed in, the same index is max and min, and so you get a difference here.
+        # The whole concept of R doesn't really make much sense with a single [data, target] pair,
+        # so this needs to be rethought.
+
         env_loss = []
         for x_e, y_e in environments:
-            x_e = x_e.to(device)
-            y_e = y_e.to(torch.float32).to(device)
             env_loss.append(self.loss_criterion(self.model(x_e), y_e))
         env_loss = torch.Tensor(env_loss)
         max_index = torch.argmax(env_loss)
         min_index = torch.argmin(env_loss)
 
+        result = 0.0
         for idx, (x_e, y_e) in enumerate(environments):
-            x_e = x_e.to(device)
-            y_e = y_e.to(torch.float32).to(device)
             if idx == max_index:
                 result += (alpha + 1) * self.loss_criterion(self.model(x_e), y_e)
             elif idx == min_index:
@@ -509,6 +528,8 @@ class StableAL:
         model = self.model
         optimizer = optim.Adam(model.parameters(), lr=self.conf.theta_lr)
         self.adv_based_on = data
+
+        self.xa_grad = None
         # For __ Theta self.conf.theta_epochs
         for i_theta in range(self.conf.theta_epochs):
             if i_theta % self.conf.adv_reset_epochs == 0 or not end_flag:
@@ -570,8 +591,6 @@ class StableAL:
             loss.backward(retain_graph=True)
             optimizer.step()
 
-        self.xa_grad *= self.conf.xa_grad_reduce
-
         if config.cli.show_cuda_memory:
             logging.debug('Memory after train_theta():')
             log_cuda_mem()
@@ -613,23 +632,30 @@ class StableAL:
 
         # If this ever becomes an issue with memory (dθ/dX doesn't fit), it should be possible to
         # do the VJP instead.
-        deltaw = einsum(
+        deltaw1 = einsum(
             self.theta_grad,
-            self.xa_grad,
+            self.xa_grad * -self.conf.xa_grad_reduce,
             self.weight_grad,
             'theta, batch theta dim_x, batch dim_x -> dim_x',
         )
 
-        deltaw *= -1
+        if epoch == 17:
+            debug_summarize(
+                True,
+                rt=rtheta,
+                dw=deltaw1,
+                tg=self.theta_grad,
+                xa=self.xa_grad,
+                wg=self.weight_grad,
+            )
 
-        debug_summarize(True, dw=deltaw)
-
+        deltaw = deltaw1
         dw_nonzero = [i for i in range(len(deltaw)) if i not in self.zero_list]
 
         deltaw[self.zero_list] = 0.0
         max_grad = torch.max(torch.abs(deltaw))
         deltastep = self.conf.deltaall
-        lr_weight = (deltastep / max_grad).detach()
+        lr_weight = (deltastep / (max_grad + self.conf.lr_weight_epsilon)).detach()
         logging.debug(f'RLoss: {rtheta.data:.4f}')
 
         self.weights -= lr_weight * deltaw.detach().reshape(self.weights.shape)
@@ -645,7 +671,7 @@ class StableAL:
                 lrw=lr_weight,
             )
 
-        if batch_idx == 1:
+        if epoch == 17:
             logging.debug(f'Zeroed values: {len(set(self.zero_list))}/{len(deltaw)}')
             logging.debug('Nonzero Δw {}'.format(deltaw[dw_nonzero]))
             logging.debug(f'weights_max: {torch.max(torch.abs(deltaw)).item()}')
@@ -721,8 +747,6 @@ with prog.Progress(
 
         logging.debug(f'[dark_slate_gray3] Epoch {epoch} [/]', extra=dict(markup=True))
         for batch_idx, (data, target) in enumerate(train_loader):
-            logging.debug(f'[pale_green1] Batch {batch_idx} [/]', extra=dict(markup=True))
-
             # Zero the gradients
             optimizer.zero_grad()
 
@@ -749,7 +773,8 @@ with prog.Progress(
                     break
 
         partial_train_loss /= batch_idx + 1
-        method.epoch_update()
+        if epoch >= config.pre_adv_epochs:
+            method.epoch_update()
 
         progress.update(
             partial_losses,
