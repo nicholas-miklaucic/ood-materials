@@ -16,4 +16,4 @@ Every `TODO` is something we need to look at.
 
 Other things that are planned:
  - Config support for changing out datasets, using the splits I made
- - Figuring out why my version of the gradients causes a CUDA memory error
+ - Replacing `Adam` with `AdamW`

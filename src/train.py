@@ -24,6 +24,8 @@ from utils import debug_shapes, debug_summarize, log_cuda_mem, same_storage, to_
 config = pyrallis.parse(MainConfig)
 
 config.cli.set_up_logging()
+
+config.rng_seed = 2717
 config.seed_torch_rng()
 
 torch.autograd.set_detect_anomaly(True)
@@ -59,7 +61,7 @@ class MyDataset(Dataset):
     def __init__(self, df):
         self.inputs = df.drop(columns=['delta_e', 'pretty_comp']).values.astype(np.float32)
         self.labels = df['delta_e'].values.astype(np.float32)
-        if config.smoke_test:
+        if config.smoke_test or config.data.use_test_mode:
             self.inputs = self.inputs[:47]
             self.labels = self.labels[:47]
 
@@ -87,9 +89,9 @@ class RecurrentDataset(Dataset):
         self.inputs = df['data'].values
         self.labels = df['label'].values
 
-        if config.smoke_test:
-            self.inputs = self.inputs[:47]
-            self.labels = self.labels[:47]
+        if config.data.use_test_mode:
+            self.inputs = self.inputs[:31]
+            self.labels = self.labels[:31]
 
         self.inputs = torch.from_numpy(np.stack(self.inputs)).to(device)
         self.labels = torch.from_numpy(np.stack(self.labels)).to(device)
@@ -334,6 +336,10 @@ class StableAL:
         self.weights = torch.zeros(dim_x).reshape(-1, 1) + 100.0
         self.weights = self.weights.to(device)
 
+        self.min_weight = torch.min(self.weights)
+        self.attack_gamma = (1.0 / self.min_weight).data
+        self.zero_list = []
+
     @property
     def grad_params(self) -> dict[str, Parameter]:
         """Params of the model used to take gradients."""
@@ -371,7 +377,6 @@ class StableAL:
     def train_theta(
         self,
         data,
-        gamma,
         end_flag=False,
         epoch=0,
         batch_idx=None,
@@ -381,12 +386,11 @@ class StableAL:
         # For __ Theta self.conf.theta_epochs
         for i_theta in range(self.conf.theta_epochs):
             if i_theta % self.conf.adv_reset_epochs == 0 or not end_flag:
-                images_adv, labels = self.attack(gamma, data, epoch=epoch, batch_idx=batch_idx)
+                images_adv, labels = self.attack(data, epoch=epoch, batch_idx=batch_idx)
 
             else:
                 self.adv_again = self.adversarial_data
                 images_adv, labels = self.attack(
-                    gamma,
                     self.adversarial_data,
                     epoch=epoch,
                     batch_idx=batch_idx,
@@ -460,7 +464,7 @@ class StableAL:
 
     # generate adversarial data
     # Maximize the loss using their own ADAM.update method(their own optimizer)
-    def attack(self, gamma, data, epoch, batch_idx):
+    def attack(self, data, epoch, batch_idx):
         attack_lr = self.conf.attack_lr
         images, labels = data
         images_adv = images.clone().detach()
@@ -477,28 +481,27 @@ class StableAL:
 
             labels = labels.float().to(device)
             images = images.to(device)
-            loss = self.loss_criterion(outputs, labels) - gamma * self.cost_function(
+            loss = self.loss_criterion(outputs, labels) - self.attack_gamma * self.cost_function(
                 images, images_adv
             )
 
             loss.backward()
-
             images_adv.data = optimizer.update(images_adv.grad, i + 1, images_adv)
 
-        self.weight_grad = -2 * gamma * attack_lr * (images_adv - images)
+        self.weight_grad = -2 * self.attack_gamma * attack_lr * (images_adv - images)
         temp_image = images_adv.clone().detach()
         temp_label = labels.clone().detach()
         self.adversarial_data = (temp_image, temp_label)
 
         # save adv and ori data
-        save_tensor(images, labels, temp_image, temp_label, epoch, batch_idx)
+        if config.log.log_adv_data:
+            save_tensor(images, labels, temp_image, temp_label, epoch, batch_idx)
 
         return images_adv, labels
 
     def train_theta_new(
         self,
         data,
-        gamma,
         end_flag=False,
         epoch=0,
         batch_idx=None,
@@ -509,12 +512,12 @@ class StableAL:
         # For __ Theta self.conf.theta_epochs
         for i_theta in range(self.conf.theta_epochs):
             if i_theta % self.conf.adv_reset_epochs == 0 or not end_flag:
-                images_adv, labels = self.attack(gamma, data, epoch=epoch, batch_idx=batch_idx)
+                images_adv, labels = self.attack(data, epoch=epoch, batch_idx=batch_idx)
 
             else:
+                # TODO what is this?
                 self.adv_again = self.adversarial_data
                 images_adv, labels = self.attack(
-                    gamma,
                     self.adversarial_data,
                     epoch=epoch,
                     batch_idx=batch_idx,
@@ -568,15 +571,16 @@ class StableAL:
             optimizer.step()
 
         self.xa_grad *= self.conf.xa_grad_reduce
-        logging.debug('Memory after train_theta():')
-        log_cuda_mem()
 
-    def adv_step_new(self, data, target, attack_gamma, end_flag, epoch, batch_idx):
+        if config.cli.show_cuda_memory:
+            logging.debug('Memory after train_theta():')
+            log_cuda_mem()
+
+    def adv_step_new(self, data, target, end_flag, epoch, batch_idx):
         # TODO split this from adv_target and adv_data
         if config.use_new_sal:
             self.train_theta_new(
                 (data, target),
-                attack_gamma,
                 end_flag,
                 epoch,
                 batch_idx,
@@ -584,7 +588,6 @@ class StableAL:
         else:
             self.train_theta(
                 (data, target),
-                attack_gamma,
                 end_flag,
                 epoch,
                 batch_idx,
@@ -616,16 +619,56 @@ class StableAL:
             self.weight_grad,
             'theta, batch theta dim_x, batch dim_x -> dim_x',
         )
+
         deltaw *= -1
 
-        deltaw[zero_list] = 0.0
+        debug_summarize(True, dw=deltaw)
+
+        dw_nonzero = [i for i in range(len(deltaw)) if i not in self.zero_list]
+
+        deltaw[self.zero_list] = 0.0
         max_grad = torch.max(torch.abs(deltaw))
         deltastep = self.conf.deltaall
         lr_weight = (deltastep / max_grad).detach()
         logging.debug(f'RLoss: {rtheta.data:.4f}')
 
         self.weights -= lr_weight * deltaw.detach().reshape(self.weights.shape)
-        logging.debug(f'self.weights.mean(): {self.weights.mean()}')
+
+        if torch.isnan(self.weights).any():
+            debug_summarize(
+                show_stat=True,
+                tg=self.theta_grad,
+                xa=self.xa_grad,
+                wg=self.weight_grad,
+                dw=deltaw,
+                mg=max_grad,
+                lrw=lr_weight,
+            )
+
+        if batch_idx == 1:
+            logging.debug(f'Zeroed values: {len(set(self.zero_list))}/{len(deltaw)}')
+            logging.debug('Nonzero Δw {}'.format(deltaw[dw_nonzero]))
+            logging.debug(f'weights_max: {torch.max(torch.abs(deltaw)).item()}')
+            logging.debug(f'self.weights.mean(): {self.weights.mean()}')
+
+    def epoch_update(self):
+        # adjust gamma according to min(weight)
+
+        logging.debug('Weights: {}'.format(self.weights.reshape(-1)))
+
+        nonzeros = []
+        self.min_weight = torch.inf
+        for i in range(self.weights.shape[0]):
+            if self.weights[i] < 0.0:
+                self.weights[i] = 1.0
+                self.zero_list.append(i)
+            else:
+                nonzeros.append(i)
+                if self.weights[i] < self.min_weight:
+                    self.min_weight = self.weights[i]
+
+        # self.weights[nonzeros] /= self.min_weight
+        self.attack_gamma = (1.0 / self.min_weight).data
 
 
 model = IRNet_intorch(train_dataset.dim_x).to(device)
@@ -643,9 +686,6 @@ adv_data, adv_target = next(iter(piezo_adv_loader))
 
 # warnings.filterwarnings("ignore")
 
-min_weight = torch.min(method.weights)
-attack_gamma = (1.0 / min_weight).data
-zero_list = []
 end_flag = False
 
 # Create a dictionary to store the best loss for each dataset
@@ -679,8 +719,9 @@ with prog.Progress(
 
         minima = []
 
+        logging.debug(f'[dark_slate_gray3] Epoch {epoch} [/]', extra=dict(markup=True))
         for batch_idx, (data, target) in enumerate(train_loader):
-            # logging.debug(f"current in epoch    {epoch}      batch {batch_idx}")
+            logging.debug(f'[pale_green1] Batch {batch_idx} [/]', extra=dict(markup=True))
 
             # Zero the gradients
             optimizer.zero_grad()
@@ -696,9 +737,11 @@ with prog.Progress(
             if epoch < config.pre_adv_epochs:
                 continue
 
-            method.adv_step_new(data, target, attack_gamma, end_flag, epoch, batch_idx)
-            logging.debug('Memory after adv_step():')
-            log_cuda_mem()
+            method.adv_step_new(data, target, end_flag, epoch, batch_idx)
+
+            if config.cli.show_cuda_memory:
+                logging.debug('Memory after adv_step():')
+                log_cuda_mem()
 
             # TODO can this if ever actually not be true?
             if epoch >= config.pre_adv_epochs:
@@ -706,6 +749,7 @@ with prog.Progress(
                     break
 
         partial_train_loss /= batch_idx + 1
+        method.epoch_update()
 
         progress.update(
             partial_losses,
@@ -800,7 +844,7 @@ with prog.Progress(
             torch.save(method.model, exp_dir / f'models/IR3_epoch_{epoch}.pt')
             torch.save(
                 method.weights,
-                exp_dir / 'models/SAL_weight_{epoch}_gamma_{attack_gamma}.pt',
+                exp_dir / 'models/SAL_weight_{epoch}_gamma_{method.attack_gamma}.pt',
             )
             save.append('Train')
         else:
@@ -828,16 +872,6 @@ with prog.Progress(
             exp_dir / 'SAL-training_loss.feather'
         )
 
-        # adjust gamma according to min(weight)
-
-        for i in range(method.weights.shape[0]):
-            if method.weights[i] > 0.0 and method.weights[i] < min_weight:
-                min_weight = method.weights[i]
-            if method.weights[i] < 0.0:
-                method.weights[i] = 1.0
-                zero_list.append(i)
-
-        attack_gamma = (1.0 / min_weight).data
         if epoch <= config.pre_adv_epochs:
             continue
 

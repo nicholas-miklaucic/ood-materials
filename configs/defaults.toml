@@ -32,6 +32,7 @@ col_name = "delta_e"
 [data]
 batch_size = 128
 log_loaders = [ "piezo",]
+use_test_mode = false
 test_split_seed = 3141
 
 [cli]
@@ -39,4 +40,4 @@ verbosity = "info"
 show_progress = true
 
 [model]
-grad_layers = [ "fc128.weight", "fc64.weight", "fc16.weight",]
+grad_layers = [ "fc16.weight",]

@@ -4,7 +4,6 @@ from enum import Enum
 from pathlib import Path
 from pprint import pprint
 from typing import Optional
-from attr import mutable
 import pandas as pd
 
 import pyrallis
@@ -104,6 +103,10 @@ class SALConfig:
     # Number of epochs between restarting adversarial data generation.
     adv_reset_epochs: int = 5
 
+    # Epsilon used to ensure numerical stability of weights. Setting to 0 matches the original SAL
+    # code, but can cause crashes due to numerical instability.
+    lr_weight_epsilon: float = 1e-5
+
     @property
     def loss_criterion(self):
         """Gets the target loss function. Default: mse_loss."""
@@ -123,6 +126,9 @@ class DataConfig:
 
     # Loaders to use. Always includes the R splits.
     log_loaders: tuple[str] = ('piezo',)
+
+    # Use a very small dataset. Only use for testing.
+    use_test_mode: bool = False
 
     # If training using data split from a test set, controls the seed.
     test_split_seed: int = 3141
@@ -146,6 +152,9 @@ class LogConfig:
     # Where logging data goes. Relative to current directory.
     exp_base_dir: Path = Path('exps')
 
+    # Whether to log adversarial data.
+    log_adv_data: bool = True
+
 
 class LoggingLevel(Enum):
     """The logging level."""
@@ -163,6 +172,9 @@ class CLIConfig:
     verbosity: LoggingLevel = LoggingLevel.info
     # Whether to show progress bars.
     show_progress: bool = True
+
+    # Whether to log CUDA memory to debug output. Only relevant if visibility is set to debug.
+    show_cuda_memory: bool = False
 
     def set_up_logging(self):
         from rich.logging import RichHandler
@@ -223,6 +235,8 @@ class MainConfig:
             self.pre_adv_epochs = 1
             self.partial.epochs_between_regens = 2
             self.data.batch_size = 10
+            self.data.use_test_mode = True
+            self.log.log_adv_data = False
 
     def seed_torch_rng(self):
         import torch

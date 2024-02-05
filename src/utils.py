@@ -93,8 +93,8 @@ def structure(obj):
 def summary_stat(obj):
     if isinstance(obj, torch.Tensor):
         flat = obj.flatten()
-        inds = torch.cos(torch.arange(len(flat), dtype=obj.dtype, device=obj.device))
-        return torch.lerp(flat, inds, 0.1).mean().item()
+        inds = 1 + 0.01 * torch.cos(torch.arange(len(flat), dtype=obj.dtype, device=obj.device))
+        return (flat * inds).mean().item()
     elif isinstance(obj, np.ndarray):
         return summary_stat(torch.tensor(obj))
     elif isinstance(obj, (list, tuple)):
@@ -113,8 +113,9 @@ def debug_summarize(show_stat=False, **kwargs):
     for k, v in kwargs.items():
         logging.debug(f'{k:>30} structure:\t{structure(v)}')
 
-        if show_stat:
-            logging.debug(f'{k:>30} stat:     \t{summary_stat(v)}')
+    if show_stat:
+        for k, v in kwargs.items():
+            logging.debug(f'{k:>30} stat:\t{summary_stat(v)}')
 
 
 def same_storage(x, y):
