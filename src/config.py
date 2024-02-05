@@ -108,6 +108,10 @@ class SALConfig:
     # code, but can cause crashes due to numerical instability.
     lr_weight_epsilon: float = 1e-5
 
+    # Number of environments to use in R(θ(w)) calculation. Must be bigger than 1 to make
+    # mathematical sense. Values are randomly split from adv_data.
+    r_theta_splits: int = 5
+
     @property
     def loss_criterion(self):
         """Gets the target loss function. Default: mse_loss."""
@@ -122,17 +126,41 @@ class TargetConfig:
 
 @dataclass
 class DataConfig:
+    # Target column. Should be one of magmom_pa, bandgap, or delta_e.
+    target: str = 'delta_e'
+
     # Batch size.
     batch_size: int = 128
 
-    # Loaders to use. Always includes the R splits.
-    log_loaders: tuple[str] = ('piezo',)
-
-    # Use a very small dataset. Only use for testing.
-    use_test_mode: bool = False
-
     # If training using data split from a test set, controls the seed.
     test_split_seed: int = 3141
+
+    # Dataset split to use. 7 is the least data, 0 is everything. The relative counts:
+    # 84190, 41437, 20394, 10037, 4939, 2430, 1196, 588.
+    dataset_split: int = 4
+
+    # Datasets to use for logging.
+    test_sets: list[str] = field(
+        default=[
+            'Xshift_tsne',
+            'Xshift_umap',
+            'statY_delta_e',
+            'infoY_delta_e',
+            'statY_bandgap',
+            'infoY_bandgap',
+            'Rsplt1',
+            'Rsplt2',
+            'Rsplt3',
+            'Rsplt4',
+            'Rsplt5',
+            'inPiezo',
+        ],
+        is_mutable=True,
+    )
+
+    # Test sets to keep unsplit, ignoring dataset_split. Use for small sets to avoid splitting them
+    # down to nothing.
+    no_split_test_sets: list[str] = field(default=['piezo'], is_mutable=True)
 
 
 @dataclass
@@ -207,6 +235,9 @@ class MainConfig:
     # Number of epochs done with the model before adversarial training begins.
     pre_adv_epochs: int = 4
 
+    # Dataset to use for adversarial training. If None, use training data.
+    adv_train_data: typing.Optional[str] = None
+
     # Early stopping.
     early_stop: int = 500
 
@@ -218,9 +249,6 @@ class MainConfig:
 
     # Network loss function.
     network_loss: LossFn = LossFn.mse
-
-    # Whether to use the new SAL code.
-    use_new_sal: bool = True
 
     # Random seed for reproducibility. If null, then don't seed the RNG.
     rng_seed: Optional[int] = 2718
@@ -239,7 +267,7 @@ class MainConfig:
             self.pre_adv_epochs = 1
             self.partial.epochs_between_regens = 2
             self.data.batch_size = 10
-            self.data.use_test_mode = True
+            self.data.dataset_split = 7
             self.log.log_adv_data = False
 
     def seed_torch_rng(self):

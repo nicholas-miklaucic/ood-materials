@@ -23,3 +23,9 @@ Other things that are planned:
  - Config support for changing what datasets get passed to the adversarial data
  - The way the weights work seems....suboptimal
  - It does seem like training loss is getting better, what's up with the stopping criterion?
+ - update code to use splits and feather file
+ - split in training set, look at test sets
+
+
+- Citation/methodology for sample weights
+-

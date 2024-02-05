@@ -25,7 +25,6 @@ config = pyrallis.parse(MainConfig)
 
 config.cli.set_up_logging()
 
-config.rng_seed = 2717
 config.seed_torch_rng()
 
 torch.autograd.set_detect_anomaly(True)
@@ -35,6 +34,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 def create_folder_based_on_time(base_path: os.PathLike):
     base_path = Path(base_path)
+
     # Get the current time
     current_time = datetime.now()
 
@@ -44,6 +44,15 @@ def create_folder_based_on_time(base_path: os.PathLike):
 
     # Create a folder name based on the formatted time
     folder_name = base_path / f'{config.target.col_name}_{time_str}'
+
+    if config.log.exp_name is not None and not config.smoke_test:
+        exp_name_path = base_path / f'{config.target.col_name}_{config.log.exp_name}'
+        if exp_name_path.exists():
+            logging.warning(
+                f'Path {exp_name_path.absolute()} already exists, using {folder_name.absolute()}'
+            )
+        else:
+            folder_name = exp_name_path
 
     for subfolder in ('adv', 'models', 'sorted'):
         os.makedirs(folder_name / subfolder, exist_ok=True)
@@ -58,12 +67,9 @@ exp_dir = create_folder_based_on_time(Path.cwd() / config.log.exp_base_dir)
 
 
 class MyDataset(Dataset):
-    def __init__(self, df):
-        self.inputs = df.drop(columns=['delta_e', 'pretty_comp']).values.astype(np.float32)
-        self.labels = df['delta_e'].values.astype(np.float32)
-        if config.smoke_test or config.data.use_test_mode:
-            self.inputs = self.inputs[:47]
-            self.labels = self.labels[:47]
+    def __init__(self, inputs, target):
+        self.inputs = inputs.values.astype(np.float32)
+        self.labels = target.values.astype(np.float32)
 
         self.inputs = torch.from_numpy(self.inputs).to(device)
         self.labels = torch.from_numpy(self.labels).to(device)
@@ -84,14 +90,14 @@ class MyDataset(Dataset):
         return (input, label)
 
 
+with open('feat_col_name.txt', 'r') as file:
+    column_names = file.read().split('\n')
+
+
 class RecurrentDataset(Dataset):
     def __init__(self, df):
-        self.inputs = df['data'].values
-        self.labels = df['label'].values
-
-        if config.data.use_test_mode:
-            self.inputs = self.inputs[:31]
-            self.labels = self.labels[:31]
+        self.inputs = df[input_cols].values.astype(np.float32)
+        self.labels = df['label'].values.astype(np.float32)
 
         self.inputs = torch.from_numpy(np.stack(self.inputs)).to(device)
         self.labels = torch.from_numpy(np.stack(self.labels)).to(device)
@@ -100,40 +106,54 @@ class RecurrentDataset(Dataset):
         return len(self.inputs)
 
     def __getitem__(self, index):
-        return self.inputs[index], self.labels[index]
+        return self.inputs[index], self.labels[index].unsqueeze(0)
 
 
 # Step 4: Use DataLoader to create batches
 batch_size = config.data.batch_size
 
-final_train = pd.read_csv('./dataset/final_trainset.csv', index_col=None)
+all_data = pd.read_feather('mpc_full_feats_scaled_split.feather')
+all_data.drop(columns=['comp', 'TSNE_x', 'TSNE_y', 'umap_x', 'umap_y'], inplace=True)
 
-train_dataset = MyDataset(final_train)
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-
-data_set_names = [f'Rsplt{i}' for i in range(1, 6)] + [
+label_cols = ['magmom_pa', 'bandgap', 'delta_e']
+all_test_sets = [
+    'Xshift_tsne',
+    'Xshift_umap',
+    'statY_delta_e',
+    'infoY_delta_e',
+    'statY_bandgap',
+    'infoY_bandgap',
+    'Rsplt1',
+    'Rsplt2',
+    'Rsplt3',
+    'Rsplt4',
+    'Rsplt5',
     'piezo',
-    'Rsplt',
-    'Xshft',
-    'statY',
-    'infoY',
 ]
 
-data_sets = {}
+input_cols = [
+    c for c in all_data.columns if c not in all_test_sets + label_cols + ['dataset_split']
+]
+test_set_flags = all_data[all_test_sets]
 
-for name in data_set_names:
-    if name.endswith(tuple('0123456789')):
-        prefix, suffix = name[:-1], name[-1]
-        file_name = f'{prefix}_testset{suffix}.csv'
-    else:
-        file_name = f'{name}_testset.csv'
+in_split = all_data['dataset_split'] >= config.data.dataset_split
+inputs = all_data.loc[in_split & (~test_set_flags).all(axis=1)]
 
-    csv = pd.read_csv(Path('dataset/') / file_name, index_col=None)
-    dataset = MyDataset(csv)
+train_dataset = MyDataset(inputs[input_cols], inputs[config.data.target])
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+
+test_sets = {}
+
+for name in config.data.test_sets:
+    test_set = all_data.query(name)
+    if name not in config.data.no_split_test_sets:
+        test_set = test_set[test_set['dataset_split'] >= config.data.dataset_split]
+
+    dataset = MyDataset(test_set[input_cols], test_set[config.data.target])
     loader = DataLoader(dataset, batch_size=len(dataset))
-    data_sets[name] = (dataset, loader)
+    test_sets[name] = (dataset, loader)
 
-data = train_dataset.getSALdata()
+# data = train_dataset.getSALdata()
 
 
 def sample_and_remove_from_testset(test_dataloader, num_samples=config.data.batch_size):
@@ -167,11 +187,7 @@ def sample_and_remove_from_testset(test_dataloader, num_samples=config.data.batc
     return sampled_test_dataloader, remaining_test_dataloader
 
 
-piezo_adv_loader, piezo1_test_loader = sample_and_remove_from_testset(data_sets['piezo'][1])
-
-
-with open('feat_col_name.txt', 'r') as file:
-    column_names = file.read().split('\n')
+piezo_adv_loader, piezo1_test_loader = sample_and_remove_from_testset(test_sets['piezo'][1])
 
 
 def save_tensor(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
@@ -245,30 +261,7 @@ class IRNet_intorch(torch.nn.Module):
 
 train_best_loss = float('inf')
 partial_train_best_loss = float('inf')
-
 Rsplt_ave_best_loss = float('inf')
-loss_df = pd.DataFrame(
-    columns=[
-        'epoch',
-        'train',
-        'partialtrain',
-        'Xshift_tsne',
-        'Xshift_umap',
-        'statY_delta_e',
-        'infoY_delta_e',
-        'statY_bandgap',
-        'infoY_bandgap',
-        'inRand1',
-        'inRand2',
-        'inRand3',
-        'inRand4',
-        'inRand5',
-        'inPizoe',
-        'RspltAVE',
-        'save',
-        'attack_gamma',
-    ]
-)
 
 
 # Optimizer Class to maximize loss of adversarial dataset
@@ -372,67 +365,6 @@ class StableAL:
             packed.append(unpacked[name].flatten())
         return torch.cat(packed)
 
-    # Optimizes the model paremeters such that the loss is minimized
-    # on the adversarial data from self.attack
-    def train_theta(
-        self,
-        data,
-        end_flag=False,
-        epoch=0,
-        batch_idx=None,
-    ):
-        optimizer = optim.Adam(model.parameters(), lr=self.conf.theta_lr)
-        self.adv_based_on = data
-        # For __ Theta self.conf.theta_epochs
-        for i_theta in range(self.conf.theta_epochs):
-            if i_theta % self.conf.adv_reset_epochs == 0 or not end_flag:
-                images_adv, labels = self.attack(data, epoch=epoch, batch_idx=batch_idx)
-
-            else:
-                self.adv_again = self.adversarial_data
-                images_adv, labels = self.attack(
-                    self.adversarial_data,
-                    epoch=epoch,
-                    batch_idx=batch_idx,
-                )
-
-            # print(f"original data: {data[0].shape}")
-            # print(f"attack data: {images_adv.shape}")
-            optimizer.zero_grad()
-            images_adv = images_adv.to(device)
-            outputs = self.model(images_adv)
-            loss = self.loss_criterion(outputs, labels.float())
-
-            dloss_dtheta = grad(loss, self.grad_param, create_graph=True)[0].reshape(-1)
-            # logging.debug(f'dl/dθ: {structure(dloss_dtheta)}')
-            # logging.debug(f'dl/dθ: {dloss_dtheta.mean()}')
-
-            # dtheta_dx2 = torch.stack(grad(list(dloss_dtheta), images_adv, create_graph=True), 1)
-
-            dtheta_dx = []
-            for j in range(dloss_dtheta.shape[0]):
-                # print(f"dloss_dtheta.shape[0]:j     {j}")
-                dtheta_dx.append(grad(dloss_dtheta[j], images_adv, create_graph=True)[0].detach())
-            dtheta_dx = torch.stack(dtheta_dx, 1).detach()
-
-            # debug_shapes('dtheta_dx2', 'dtheta_dx')
-            # print(torch.max(abs(dtheta_dx2 - dtheta_dx)))
-
-            if self.xa_grad is None:
-                self.xa_grad = 0
-            self.xa_grad += dtheta_dx
-
-            # logging.debug(f'self.xa_grad: {self.xa_grad.mean()}')
-
-            del dtheta_dx
-            del dloss_dtheta
-            torch.cuda.empty_cache()
-
-            loss.backward(retain_graph=True)
-            optimizer.step()
-
-        self.xa_grad *= self.conf.xa_grad_reduce
-
     def cost_function(self, x, x_adv):
         # Variable cost level where the weights determine the cost level
         cost = torch.mean(((x - x_adv) ** 2).mm(self.weights)).to(device)
@@ -441,44 +373,31 @@ class StableAL:
     # Loss across Training environments
     # Self.loss_criterion = MSELoss
     def r(self, environments, alpha=None):
-        # env_loss = torch.empty(
-        #     len(environments),
-        #     device=device,
-        #     dtype=torch.float32,
-        # )
-        # for i, (x_e, y_e) in enumerate(environments):
-        #     x_e = x_e.to(device)
-        #     y_e = y_e.to(torch.float32).to(device)
-        #     env_loss[i] = self.loss_criterion(self.model(x_e), y_e)
+        if len(environments) == 1:
+            # split single environment into multiple
+            x, y = environments[0]
+            inds = torch.randperm(len(x))
+            environments = []
+            for ix in torch.tensor_split(inds, self.conf.r_theta_splits):
+                environments.append([x[ix], y[ix]])
 
-        # max_index = torch.argmax(env_loss)
-        # min_index = torch.argmin(env_loss)
+        env_loss = torch.empty(
+            len(environments),
+            device=device,
+            dtype=torch.float32,
+        )
+        for i, (x_e, y_e) in enumerate(environments):
+            x_e = x_e.to(device)
+            y_e = y_e.to(torch.float32).to(device)
+            env_loss[i] = self.loss_criterion(self.model(x_e), y_e)
 
-        # env_loss[max_index] *= 1 + alpha
-        # env_loss[min_index] *= 1 - alpha
-        # result = torch.sum(env_loss)
-        # return result
-
-        # TODO The reason the below original code is different is because of the elif. When only one
-        # environment is passed in, the same index is max and min, and so you get a difference here.
-        # The whole concept of R doesn't really make much sense with a single [data, target] pair,
-        # so this needs to be rethought.
-
-        env_loss = []
-        for x_e, y_e in environments:
-            env_loss.append(self.loss_criterion(self.model(x_e), y_e))
-        env_loss = torch.Tensor(env_loss)
+        # TODO consider making this softmax?
         max_index = torch.argmax(env_loss)
         min_index = torch.argmin(env_loss)
 
-        result = 0.0
-        for idx, (x_e, y_e) in enumerate(environments):
-            if idx == max_index:
-                result += (alpha + 1) * self.loss_criterion(self.model(x_e), y_e)
-            elif idx == min_index:
-                result += (1 - alpha) * self.loss_criterion(self.model(x_e), y_e)
-            else:
-                result += self.loss_criterion(self.model(x_e), y_e)
+        env_loss[max_index] *= 1 + alpha
+        env_loss[min_index] *= 1 - alpha
+        result = torch.sum(env_loss)
         return result
 
     # generate adversarial data
@@ -518,7 +437,7 @@ class StableAL:
 
         return images_adv, labels
 
-    def train_theta_new(
+    def train_theta(
         self,
         data,
         end_flag=False,
@@ -545,8 +464,9 @@ class StableAL:
                 )
 
             # TODO deal with batch norm properly
-            # from torch.func import replace_all_batch_norm_modules_
-            # replace_all_batch_norm_modules_(self.model)
+            from torch.func import replace_all_batch_norm_modules_
+
+            replace_all_batch_norm_modules_(self.model)
 
             optimizer.zero_grad()
             images_adv = images_adv.to(device)
@@ -597,20 +517,12 @@ class StableAL:
 
     def adv_step_new(self, data, target, end_flag, epoch, batch_idx):
         # TODO split this from adv_target and adv_data
-        if config.use_new_sal:
-            self.train_theta_new(
-                (data, target),
-                end_flag,
-                epoch,
-                batch_idx,
-            )
-        else:
-            self.train_theta(
-                (data, target),
-                end_flag,
-                epoch,
-                batch_idx,
-            )
+        self.train_theta(
+            (data, target),
+            end_flag,
+            epoch,
+            batch_idx,
+        )
 
         rtheta = self.r([[data, target]], alpha=self.conf.alpha / math.sqrt(epoch + 1))
 
@@ -704,8 +616,6 @@ logging.debug(config.model.show_grad_layers(model))
 
 
 method = StableAL(model, train_dataset.dim_x, config.sal)
-# TODO in StableAL([train_dataset.getSALdata()]), why was the list being passed in? AFAIK it wasn't
-# being used
 
 adv_data, adv_target = next(iter(piezo_adv_loader))
 
@@ -730,6 +640,7 @@ with prog.Progress(
     refresh_per_second=3,
     disable=not config.cli.show_progress,
 ) as progress:
+    model.train()
     partial_losses = progress.add_task(
         '[deep_pink3] Partial [/deep_pink3]',
         total=config.max_epochs,
@@ -761,7 +672,12 @@ with prog.Progress(
             if epoch < config.pre_adv_epochs:
                 continue
 
-            method.adv_step_new(data, target, end_flag, epoch, batch_idx)
+            if config.adv_train_data is None:
+                adv_data, adv_target = data, target
+            else:
+                ds, loader = test_sets[config.adv_train_data]
+                adv_data, adv_target = next(iter(loader))
+            method.adv_step_new(adv_data, adv_target, end_flag, epoch, batch_idx)
 
             if config.cli.show_cuda_memory:
                 logging.debug('Memory after adv_step():')
@@ -771,6 +687,8 @@ with prog.Progress(
             if epoch >= config.pre_adv_epochs:
                 if batch_idx == config.partial.partial_batch:  # train partial trainset
                     break
+            else:
+                raise ValueError('Whoops')
 
         partial_train_loss /= batch_idx + 1
         if epoch >= config.pre_adv_epochs:
@@ -787,20 +705,28 @@ with prog.Progress(
                 logging.debug('sorting training set')
                 # for sorting Training set
                 sort_MAE = []
-                method.model.eval()
-                for i, (x, y) in enumerate(train_dataset):
-                    output = method.model(x.unsqueeze(0))
-                    loss = config.loss_criterion(output, y.unsqueeze(0)).cpu()
-                    # Accumulate the training loss
-                    train_loss += loss.item()
-                    # logging.debug(f"loss:       {loss}")
-                    sort_MAE.append({'data': to_np(x), 'label': to_np(y), 'loss': loss.item()})
+                model.eval()
 
+                train_losses = []
+                for i, (x, y) in enumerate(train_loader):
+                    output = model(x)
+                    loss = config.loss_criterion(output, y, reduction='none')
+                    train_losses.append(loss)
+
+                    debug_summarize(loss=loss, output=output, x=x, y=y)
+
+                    row = pd.DataFrame(to_np(x), columns=input_cols)
+                    row['label'] = to_np(y)
+                    row['yhat'] = to_np(output)
+                    row['loss'] = to_np(loss)
+                    sort_MAE.append(row)
+
+                train_loss = torch.cat(train_losses).mean().item()
+
+                sort_MAE = pd.concat(sort_MAE)
                 if epoch % config.partial_epoch_save == 0:
-                    sort_MAE = pd.DataFrame(sort_MAE)
-                    sort_MAE.to_csv(exp_dir / f'sorted/train_set_sorting_{epoch}.csv', index=False)
+                    sort_MAE.to_feather(exp_dir / f'sorted/train_set_sorting_{epoch}.feather')
 
-                sort_MAE = pd.DataFrame(sort_MAE)
                 new_train = sort_MAE.sort_values(by=['loss'], ascending=False)
                 new_train_dataset = RecurrentDataset(new_train)
                 train_loader = DataLoader(
@@ -810,7 +736,6 @@ with prog.Progress(
                     drop_last=True,
                 )
 
-                train_loss /= len(train_dataset.inputs)
                 logging.debug(
                     f'Epoch {epoch+1}/{config.max_epochs} - Training loss: {train_loss:.4f} '
                 )
@@ -845,15 +770,16 @@ with prog.Progress(
             mean_loss /= total_batches
             return mean_loss
 
-        rsplts = [f'Rsplt{i}' for i in range(1, 6)]
-        others = config.data.log_loaders
+        rsplts = [f'Rsplt{i}' for i in range(1, 6) if f'Rsplt{i}' in config.data.test_sets]
+        others = config.data.test_sets
 
         for dataset_name in rsplts + list(others):
-            (_dataset, loader) = data_sets[dataset_name]
-            loader_mse_loss = calculate_loss(loader, method.model, config.loss_criterion)
+            (_dataset, loader) = test_sets[dataset_name]
+            loader_mse_loss = calculate_loss(loader, model, config.loss_criterion)
             losses_dict[dataset_name] = loader_mse_loss
 
-        losses_dict['rsplt_ave'] = np.average([losses_dict[rsplt] for rsplt in rsplts])
+        if rsplts:
+            losses_dict['rsplt_ave'] = np.average([losses_dict[rsplt] for rsplt in rsplts])
 
         save = []
         # Separate loop to update the best loss for all datasets
@@ -866,7 +792,7 @@ with prog.Progress(
         if train_loss < train_best_loss:
             train_best_loss = train_loss
             counter = 0
-            torch.save(method.model, exp_dir / f'models/IR3_epoch_{epoch}.pt')
+            torch.save(model, exp_dir / f'models/IR3_epoch_{epoch}.pt')
             torch.save(
                 method.weights,
                 exp_dir / f'models/SAL_weight_{epoch}_gamma_{method.attack_gamma}.pt',
@@ -896,9 +822,6 @@ with prog.Progress(
         mse_losses_df.reset_index().rename(columns={'index': 'epoch'}).to_feather(
             exp_dir / 'SAL-training_loss.feather'
         )
-
-        if epoch <= config.pre_adv_epochs:
-            continue
 
 
 torch.save(method.weights, exp_dir / f'Whole_SAL_{epoch}.pt')
