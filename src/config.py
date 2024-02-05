@@ -268,7 +268,6 @@ class MainConfig:
             self.partial.epochs_between_regens = 2
             self.data.batch_size = 10
             self.data.dataset_split = 7
-            self.log.log_adv_data = False
 
     def seed_torch_rng(self):
         import torch

@@ -202,11 +202,11 @@ def save_tensor(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
     ori_data_list = ori_data.clone().cpu().numpy()
     ori_labels_list = ori_lab.clone().cpu().numpy()
     adv_data_list = adv_data.clone().cpu().numpy()
-    adv_labels_list = adv_lab.clone().cpu().tolist()
+    adv_labels_list = adv_lab.clone().cpu().numpy()
 
     filename = exp_dir / 'adv' / f'adv_data_labels_in_attack{epoch}_{batch_idx}.feather'
 
-    header = column_names + ['label']  # [f'feature_{i}' for i in range(ori_data_list.shape[1])]
+    header = input_cols + ['label']
 
     # Write data and labels for each group
     rows_group1 = np.column_stack((ori_data_list, ori_labels_list))
@@ -792,7 +792,7 @@ with prog.Progress(
                 save.append(dataset_name)
 
         # Stop the training process if the training loss has stopped decreasing or has started to increase
-        if train_loss < train_best_loss:
+        if train_loss < train_best_loss or epoch == config.pre_adv_epochs * 2:
             train_best_loss = train_loss
             counter = 0
             torch.save(model, exp_dir / f'models/IR3_epoch_{epoch}.pt')
