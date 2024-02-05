@@ -798,7 +798,7 @@ with prog.Progress(
 
                 if epoch % config.partial_epoch_save == 0:
                     sort_MAE = pd.DataFrame(sort_MAE)
-                    sort_MAE.to_csv(exp_dir / 'sorted/train_set_sorting_{epoch}.csv', index=False)
+                    sort_MAE.to_csv(exp_dir / f'sorted/train_set_sorting_{epoch}.csv', index=False)
 
                 sort_MAE = pd.DataFrame(sort_MAE)
                 new_train = sort_MAE.sort_values(by=['loss'], ascending=False)
@@ -869,7 +869,7 @@ with prog.Progress(
             torch.save(method.model, exp_dir / f'models/IR3_epoch_{epoch}.pt')
             torch.save(
                 method.weights,
-                exp_dir / 'models/SAL_weight_{epoch}_gamma_{method.attack_gamma}.pt',
+                exp_dir / f'models/SAL_weight_{epoch}_gamma_{method.attack_gamma}.pt',
             )
             save.append('Train')
         else:
