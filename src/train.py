@@ -27,6 +27,8 @@ config.cli.set_up_logging()
 
 config.seed_torch_rng()
 
+torch.cuda.memory._record_memory_history()
+
 torch.autograd.set_detect_anomaly(True)
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -506,7 +508,6 @@ class StableAL:
                 
                 jac = vjp_func(theta_grad)[0]
 
-                debug_summarize(grad=grad, jac=jac, loss=loss)
                 # (dtheta_dx, _loss3) = d2l_th_x(
                 #     self.pack_grad_params(self.grad_params), images_adv, labels, params
                 # )
@@ -560,7 +561,7 @@ class StableAL:
 
         # If this ever becomes an issue with memory (dθ/dX doesn't fit), it should be possible to
         # do the VJP instead.
-        debug_summarize(xa=self.xa_grad, wg=self.weight_grad)
+        # debug_summarize(xa=self.xa_grad, wg=self.weight_grad)
         deltaw1 = einsum(
             # self.theta_grad,
             self.xa_grad * -self.conf.xa_grad_reduce,
@@ -841,3 +842,5 @@ with prog.Progress(
 
 torch.save(method.weights, exp_dir / f'Whole_SAL_{epoch}.pt')
 torch.save(method.model, exp_dir / f'IR3_epoch_{epoch}.pt')
+
+torch.cuda.memory._dump_snapshot('snapshot.pickle')

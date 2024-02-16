@@ -55,9 +55,9 @@ test_sets = [
 no_split_test_sets = ["piezo"]
 
 [cli]
-verbosity = "info"
+verbosity = "debug"
 show_progress = true
-show_cuda_memory = false
+show_cuda_memory = true
 
 [model]
-grad_layers = ["fc16.weight"]
+grad_layers = ["fc128.weight", "fc64.weight", "fc16.weight"]
