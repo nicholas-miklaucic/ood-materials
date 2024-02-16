@@ -17,7 +17,7 @@ import torch.optim as optim
 from config import MainConfig, SALConfig
 from einops import einsum, rearrange
 from torch.autograd import grad
-from torch.func import grad_and_value, jacrev
+from torch.func import grad_and_value, jacrev, jacfwd, jvp, vjp
 from torch.utils.data import DataLoader, Dataset, Subset
 from utils import debug_shapes, debug_summarize, log_cuda_mem, same_storage, to_np
 
@@ -26,8 +26,6 @@ config = pyrallis.parse(MainConfig)
 config.cli.set_up_logging()
 
 config.seed_torch_rng()
-
-torch.cuda.memory._record_memory_history()
 
 torch.autograd.set_detect_anomaly(True)
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
@@ -451,6 +449,7 @@ class StableAL:
         end_flag=False,
         epoch=0,
         batch_idx=None,
+        theta_grad=None
     ):
         model = self.model
         optimizer = optim.Adam(model.parameters(), lr=self.conf.theta_lr)
@@ -495,26 +494,32 @@ class StableAL:
             # l_th_out = dl_th(grad_param, images_adv, labels, nuisance_params)
             # debug_shapes("l_th_out")
 
-            d2l_th_x = jacrev(dl_th, argnums=1, has_aux=True)
-
             params = dict(self.model.named_parameters())
 
             # (dloss_dtheta, _loss2) = dl_th(self.grad_params, images_adv, labels, params)
             # dloss_dtheta = dloss_dtheta.reshape(-1)
 
             with torch.no_grad():
-                (dtheta_dx, _loss3) = d2l_th_x(
-                    self.pack_grad_params(self.grad_params), images_adv, labels, params
-                )
 
-            # debug_summarize(**dict(self.model.named_parameters()))
+                theta_as_f_xa = lambda xa: dl_th(self.pack_grad_params(self.grad_params), xa, labels, params)
+                (out, vjp_func, loss1) = vjp(theta_as_f_xa, images_adv, has_aux=True)
+                
+                jac = vjp_func(theta_grad)[0]
 
-            # dtheta_dx = reduce(dtheta_dx, 'l1 l2 batch dim_x -> l1 l2 dim_x', 'sum')
-            dtheta_dx = rearrange(dtheta_dx, 'theta batch dim_x -> batch theta dim_x')
+                debug_summarize(grad=grad, jac=jac, loss=loss)
+                # (dtheta_dx, _loss3) = d2l_th_x(
+                #     self.pack_grad_params(self.grad_params), images_adv, labels, params
+                # )
 
-            if self.xa_grad is None:
-                self.xa_grad = 0
-            self.xa_grad += dtheta_dx
+                # debug_summarize(**dict(self.model.named_parameters()))
+
+                # dtheta_dx = reduce(dtheta_dx, 'l1 l2 batch dim_x -> l1 l2 dim_x', 'sum')
+                # dtheta_dx = rearrange(jac, 'theta batch dim_x -> batch theta dim_x')
+                # shape is already batch dim_x
+
+                if self.xa_grad is None:
+                    self.xa_grad = 0
+                self.xa_grad += jac
 
             loss.backward(retain_graph=True)
             optimizer.step()
@@ -524,14 +529,6 @@ class StableAL:
             log_cuda_mem()
 
     def adv_step_new(self, data, target, end_flag, epoch, batch_idx):
-        # TODO split this from adv_target and adv_data
-        self.train_theta(
-            (data, target),
-            end_flag,
-            epoch,
-            batch_idx,
-        )
-
         rtheta = self.r([[data, target]], alpha=self.conf.alpha / math.sqrt(epoch + 1))
 
         # debug_summarize(grad_params=self.grad_params)
@@ -544,6 +541,17 @@ class StableAL:
             {n: gradient for gradient, n in zip(self.theta_grad, sorted(self.grad_layers))}
         )
 
+        # TODO split this from adv_target and adv_data
+        self.train_theta(
+            (data, target),
+            end_flag,
+            epoch,
+            batch_idx,
+            self.theta_grad
+        )
+
+
+
         # debug_shapes(th_gr=self.theta_grad, xa=self.xa_grad, wg=self.weight_grad)
 
         # dR/dθ: theta
@@ -552,11 +560,13 @@ class StableAL:
 
         # If this ever becomes an issue with memory (dθ/dX doesn't fit), it should be possible to
         # do the VJP instead.
+        debug_summarize(xa=self.xa_grad, wg=self.weight_grad)
         deltaw1 = einsum(
-            self.theta_grad,
+            # self.theta_grad,
             self.xa_grad * -self.conf.xa_grad_reduce,
             self.weight_grad,
-            'theta, batch theta dim_x, batch dim_x -> dim_x',
+            # 'theta, batch theta dim_x, batch dim_x -> dim_x',
+            'batch dim_x, batch dim_x -> dim_x'
         )
 
         if epoch == 17:
@@ -831,5 +841,3 @@ with prog.Progress(
 
 torch.save(method.weights, exp_dir / f'Whole_SAL_{epoch}.pt')
 torch.save(method.model, exp_dir / f'IR3_epoch_{epoch}.pt')
-
-torch.cuda.memory._dump_snapshot("snapshot.pickle")
