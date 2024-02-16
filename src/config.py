@@ -153,7 +153,7 @@ class DataConfig:
             'Rsplt3',
             'Rsplt4',
             'Rsplt5',
-            'inPiezo',
+            'piezo',
         ],
         is_mutable=True,
     )
