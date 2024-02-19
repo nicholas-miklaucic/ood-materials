@@ -27,7 +27,7 @@ config.cli.set_up_logging()
 
 config.seed_torch_rng()
 
-torch.cuda.memory._record_memory_history()
+# torch.cuda.memory._record_memory_history()
 
 torch.autograd.set_detect_anomaly(True)
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
@@ -445,14 +445,7 @@ class StableAL:
 
         return images_adv, labels
 
-    def train_theta(
-        self,
-        data,
-        end_flag=False,
-        epoch=0,
-        batch_idx=None,
-        theta_grad=None
-    ):
+    def train_theta(self, data, end_flag=False, epoch=0, batch_idx=None, theta_grad=None):
         model = self.model
         optimizer = optim.Adam(model.parameters(), lr=self.conf.theta_lr)
         self.adv_based_on = data
@@ -502,10 +495,11 @@ class StableAL:
             # dloss_dtheta = dloss_dtheta.reshape(-1)
 
             with torch.no_grad():
-
-                theta_as_f_xa = lambda xa: dl_th(self.pack_grad_params(self.grad_params), xa, labels, params)
+                theta_as_f_xa = lambda xa: dl_th(
+                    self.pack_grad_params(self.grad_params), xa, labels, params
+                )  # noqa: E731
                 (out, vjp_func, loss1) = vjp(theta_as_f_xa, images_adv, has_aux=True)
-                
+
                 jac = vjp_func(theta_grad)[0]
 
                 # (dtheta_dx, _loss3) = d2l_th_x(
@@ -543,18 +537,14 @@ class StableAL:
         )
 
         # TODO split this from adv_target and adv_data
-        self.train_theta(
-            (data, target),
-            end_flag,
-            epoch,
-            batch_idx,
-            self.theta_grad
-        )
-
-
+        self.train_theta((data, target), end_flag, epoch, batch_idx, self.theta_grad)
 
         # debug_shapes(th_gr=self.theta_grad, xa=self.xa_grad, wg=self.weight_grad)
 
+        # (a * B)
+        # (a * B) * C
+        # ...
+        # a * (B * C * D * E)
         # dR/dθ: theta
         # dθ/dX: batch theta dim_x
         # dX/dw: batch dim_x
@@ -567,7 +557,7 @@ class StableAL:
             self.xa_grad * -self.conf.xa_grad_reduce,
             self.weight_grad,
             # 'theta, batch theta dim_x, batch dim_x -> dim_x',
-            'batch dim_x, batch dim_x -> dim_x'
+            'batch dim_x, batch dim_x -> dim_x',
         )
 
         if epoch == 17:
@@ -611,7 +601,7 @@ class StableAL:
     def epoch_update(self):
         # adjust gamma according to min(weight)
 
-        logging.debug('Weights: {}'.format(self.weights.reshape(-1)))
+        logging.info('Weights: {}'.format(self.weights.reshape(-1)))
 
         nonzeros = []
         self.min_weight = torch.inf
@@ -729,7 +719,7 @@ with prog.Progress(
                     loss = config.loss_criterion(output, y, reduction='none')
                     train_losses.append(loss)
 
-                    debug_summarize(loss=loss, output=output, x=x, y=y)
+                    # debug_summarize(loss=loss, output=output, x=x, y=y)
 
                     row = pd.DataFrame(to_np(x), columns=input_cols)
                     row['label'] = to_np(y)
@@ -840,7 +830,6 @@ with prog.Progress(
         )
 
 
-torch.save(method.weights, exp_dir / f'Whole_SAL_{epoch}.pt')
-torch.save(method.model, exp_dir / f'IR3_epoch_{epoch}.pt')
-
-torch.cuda.memory._dump_snapshot('snapshot.pickle')
+# torch.save(method.weights, exp_dir / f'Whole_SAL_{epoch}.pt')
+# torch.save(method.model, exp_dir / f'IR3_epoch_{epoch}.pt')
+# torch.cuda.memory._dump_snapshot('snapshot.pickle')

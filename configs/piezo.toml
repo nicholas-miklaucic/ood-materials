@@ -19,15 +19,15 @@ exp_name = "piezo"
 
 [sal]
 target_loss = "smooth_l1"
-xa_grad_reduce = 0.01
+xa_grad_reduce = 0.1
 deltaall = 20
 alpha = 0.5
-attack_lr = 5e-5
+attack_lr = 5e-4
 attack_epochs = 2
-theta_lr = 5e-5
+theta_lr = 5e-4
 theta_epochs = 10
 adv_reset_epochs = 5
-lr_weight_epsilon = 1e-5
+lr_weight_epsilon = 1e-10
 r_theta_splits = 5
 
 [target]
@@ -55,7 +55,7 @@ test_sets = [
 no_split_test_sets = ["piezo"]
 
 [cli]
-verbosity = "debug"
+verbosity = "info"
 show_progress = true
 show_cuda_memory = true
 
