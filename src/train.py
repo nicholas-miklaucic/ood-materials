@@ -264,6 +264,7 @@ class IRNet_intorch(torch.nn.Module):
         return self.out(out)
 
 
+
 train_best_loss = float('inf')
 partial_train_best_loss = float('inf')
 Rsplt_ave_best_loss = float('inf')
@@ -617,6 +618,10 @@ class StableAL:
 
 model = IRNet_intorch(train_dataset.dim_x, config.model).to(device)
 optimizer = optim.Adam(model.parameters(), lr=config.network_lr)
+ema_model = torch.optim.swa_utils.AveragedModel(
+    model,
+    multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(config.model.ema_decay)
+)
 
 logging.debug(config.model.show_grad_layers(model))
 
@@ -752,6 +757,8 @@ with prog.Progress(
             train_loss += loss.item()
         train_loss /= len(train_loader)
 
+        ema_model.update_parameters(model)
+
         progress.update(
             network_losses,
             advance=1,
@@ -827,6 +834,7 @@ with prog.Progress(
         )
 
 
-# torch.save(method.weights, exp_dir / f'Whole_SAL_{epoch}.pt')
-# torch.save(method.model, exp_dir / f'IR3_epoch_{epoch}.pt')
+torch.save(method.weights, exp_dir / f'Whole_SAL_{epoch}.pt')
+torch.save(model, exp_dir / f'IR3_epoch_{epoch}.pt')
+torch.save(ema_model, exp_dir / 'IR3_EMA.pt')
 # torch.cuda.memory._dump_snapshot('snapshot.pickle')

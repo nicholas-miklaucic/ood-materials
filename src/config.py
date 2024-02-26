@@ -66,6 +66,9 @@ class ModelConfig:
         is_mutable=True,
     )
 
+    # EMA decay parameter.
+    ema_decay: float = 0.999
+
     def get_grad_layers(self, model):
         """Gets grad layers to use, interpreting 'all' to mean every layer."""
         if 'all' in self.grad_layers:
