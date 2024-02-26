@@ -9,7 +9,7 @@ adv_train_data = "piezo"
 
 [partial]
 epochs_between_regens = 3
-partial_batch = 5
+partial_batch = 10
 
 [log]
 partial_regens_per_log = 20
