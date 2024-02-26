@@ -1,5 +1,5 @@
 smoke_test = false
-pre_adv_epochs = 4
+pre_adv_epochs = 10
 early_stop = 50
 max_epochs = 500
 network_lr = 1e-4
@@ -37,7 +37,7 @@ col_name = "delta_e"
 target = "delta_e"
 batch_size = 256
 test_split_seed = 3141
-dataset_split = 2
+dataset_split = 0
 test_sets = [
     "Xshift_tsne",
     "Xshift_umap",
@@ -60,4 +60,4 @@ show_progress = true
 show_cuda_memory = true
 
 [model]
-grad_layers = ["fc128.weight", "fc64.weight", "fc16.weight"]
+grad_layers = ["all"]

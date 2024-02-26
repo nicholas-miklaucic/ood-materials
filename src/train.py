@@ -14,7 +14,7 @@ import rich.progress as prog
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from config import MainConfig, SALConfig
+from config import MainConfig, ModelConfig, NormFn, SALConfig
 from einops import einsum, rearrange
 from torch.autograd import grad
 from torch.func import grad_and_value, jacrev, jacfwd, jvp, vjp
@@ -222,49 +222,46 @@ def save_tensor(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
 
 
 class IRNet_intorch(torch.nn.Module):
-    #'128-64-16'
-    def __init__(self, input_size):
-        super(IRNet_intorch, self).__init__()
-        self.fc128 = nn.Linear(128, 128)
-        self.fc64 = nn.Linear(64, 64)
-        self.fc16 = nn.Linear(16, 16)
+    def __init__(self, input_size, model_conf: ModelConfig):
+        super(IRNet_intorch, self).__init__()        
+        self.dims = model_conf.layer_dims
 
-        self.bn128 = nn.BatchNorm1d(128)
-        self.bn64 = nn.BatchNorm1d(64)
-        self.bn16 = nn.BatchNorm1d(16)
+        self.adapters = []
+        self.layers = []
+        i = 0
+        prev_dim = input_size
+        for dim in self.dims:
+            fc = nn.Linear(prev_dim, dim)            
+            bn = getattr(torch.nn, model_conf.norm_type.value)(dim)
+            #bn = nn.BatchNorm1d(dim)
+            act = nn.ReLU()
+            do=nn.Dropout(p=model_conf.dropout_prop)
+            mod = nn.Sequential(fc, bn, do, act)
+            self.add_module(f'layer{i}', mod)
+            self.layers.append(mod)
 
-        self.relu = nn.ReLU()
-        self.inputlayer = nn.Linear(input_size, 128)
+            if dim != prev_dim:
+                adapter = nn.Linear(prev_dim, dim)
+                self.add_module(f'adapter{i}', adapter)
+                self.adapters.append(adapter)
+            else:
+                self.adapters.append(None)
 
-        self.con128_64 = nn.Linear(128, 64)
-        self.con64_16 = nn.Linear(64, 16)
-        self.output16 = nn.Linear(16, 1)
+            prev_dim = dim
+            i += 1
+
+        self.out = nn.Linear(dim, 1)
 
     def forward(self, x):
-        x = self.inputlayer(x)
+        out = x
+        for layer, adapter in zip(self.layers, self.adapters):
+            if adapter is not None:
+                out_res = adapter(out)
+            else:
+                out_res = 0
+            out = layer(out) + out_res
 
-        x_res = x
-        x = self.fc128(x)
-        x = self.bn128(x)
-        x = self.relu(x)
-        x = x + x_res
-        x = self.con128_64(x)
-
-        x_res = x
-        x = self.fc64(x)
-        x = self.bn64(x)
-        x = self.relu(x)
-        x = x + x_res
-        x = self.con64_16(x)
-
-        x_res = x
-        x = self.fc16(x)
-        x = self.bn16(x)
-        x = self.relu(x)
-        x = x + x_res
-
-        x = self.output16(x)
-        return x
+        return self.out(out)
 
 
 train_best_loss = float('inf')
@@ -311,7 +308,7 @@ class StableAL:
         model: torch.nn.Module,
         dim_x: int,
         sal_conf: SALConfig,
-        grad_layers: tuple[str] = config.model.grad_layers,
+        grad_layers: tuple[str],
     ):
         self.weights = None
         self.model = model
@@ -465,10 +462,10 @@ class StableAL:
                     batch_idx=batch_idx,
                 )
 
-            # TODO deal with batch norm properly
-            from torch.func import replace_all_batch_norm_modules_
+            if config.model.norm_type == NormFn.batch:
+                from torch.func import replace_all_batch_norm_modules_
 
-            replace_all_batch_norm_modules_(self.model)
+                replace_all_batch_norm_modules_(self.model)
 
             optimizer.zero_grad()
             images_adv = images_adv.to(device)
@@ -618,13 +615,13 @@ class StableAL:
         self.attack_gamma = (1.0 / self.min_weight).data
 
 
-model = IRNet_intorch(train_dataset.dim_x).to(device)
+model = IRNet_intorch(train_dataset.dim_x, config.model).to(device)
 optimizer = optim.Adam(model.parameters(), lr=config.network_lr)
 
 logging.debug(config.model.show_grad_layers(model))
 
 
-method = StableAL(model, train_dataset.dim_x, config.sal)
+method = StableAL(model, train_dataset.dim_x, config.sal, config.model.get_grad_layers(model))
 
 
 # warnings.filterwarnings("ignore")

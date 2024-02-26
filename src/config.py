@@ -22,6 +22,10 @@ class LossFn(Enum):
     huber = 'huber'
     l1 = 'l1'
 
+class NormFn(Enum):
+    batch = 'BatchNorm1d'
+    layer = 'LayerNorm'    
+
 
 # self.fc128 = nn.Linear(128, 128)
 # self.fc64 = nn.Linear(64, 64)
@@ -43,19 +47,37 @@ class LossFn(Enum):
 class ModelConfig:
     """Configuration for model."""
 
-    # Layers to use inside SAL for gradients.
+    # The dimensions of the layers of the network.
+    layer_dims: list[int] = field(default=[
+        2048, 1024, 512
+    ], is_mutable=True)
+
+    # Dropout amount to use. 0 disables dropout. 1 disables every weight.
+    dropout_prop: float = 0.5
+
+    # Normalization layer to use.
+    norm_type: NormFn = NormFn.layer
+
+    # Layers to use inside SAL for gradients. 'all' means all trainable parameters.
     grad_layers: list[str] = field(
         default=[
-            'fc16.weight',
+            'all',
         ],
         is_mutable=True,
     )
+
+    def get_grad_layers(self, model):
+        """Gets grad layers to use, interpreting 'all' to mean every layer."""
+        if 'all' in self.grad_layers:
+            return [name for (name, vals) in model.named_parameters()]
+        else:
+            return self.grad_layers
 
     def show_grad_layers(self, model):
         """Shows memory usage for grad layers."""
         param_names = dict(model.named_parameters())
         table = []
-        for layer in self.grad_layers:
+        for layer in self.get_grad_layers(model):
             if layer not in param_names:
                 raise ValueError(
                     f'Layer {layer} is not in model!\nModel params:\n'
@@ -106,7 +128,7 @@ class SALConfig:
 
     # Epsilon used to ensure numerical stability of weights. Setting to 0 matches the original SAL
     # code, but can cause crashes due to numerical instability.
-    lr_weight_epsilon: float = 1e-5
+    lr_weight_epsilon: float = 1e-12
 
     # Number of environments to use in R(θ(w)) calculation. Must be bigger than 1 to make
     # mathematical sense. Values are randomly split from adv_data.
@@ -130,14 +152,14 @@ class DataConfig:
     target: str = 'delta_e'
 
     # Batch size.
-    batch_size: int = 128
+    batch_size: int = 256
 
     # If training using data split from a test set, controls the seed.
     test_split_seed: int = 3141
 
     # Dataset split to use. 7 is the least data, 0 is everything. The relative counts:
     # 84190, 41437, 20394, 10037, 4939, 2430, 1196, 588.
-    dataset_split: int = 4
+    dataset_split: int = 0
 
     # Datasets to use for logging.
     test_sets: list[str] = field(

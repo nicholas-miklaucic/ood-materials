@@ -25,7 +25,7 @@ attack_epochs = 2
 theta_lr = 0.01
 theta_epochs = 10
 adv_reset_epochs = 5
-lr_weight_epsilon = 1e-5
+lr_weight_epsilon = 1e-12
 r_theta_splits = 5
 
 [target]
@@ -33,24 +33,11 @@ col_name = "delta_e"
 
 [data]
 target = "delta_e"
-batch_size = 128
+batch_size = 256
 test_split_seed = 3141
-dataset_split = 4
-test_sets = [
-    "Xshift_tsne",
-    "Xshift_umap",
-    "statY_delta_e",
-    "infoY_delta_e",
-    "statY_bandgap",
-    "infoY_bandgap",
-    "Rsplt1",
-    "Rsplt2",
-    "Rsplt3",
-    "Rsplt4",
-    "Rsplt5",
-    "piezo",
-]
-no_split_test_sets = ["piezo"]
+dataset_split = 0
+test_sets = [ "Xshift_tsne", "Xshift_umap", "statY_delta_e", "infoY_delta_e", "statY_bandgap", "infoY_bandgap", "Rsplt1", "Rsplt2", "Rsplt3", "Rsplt4", "Rsplt5", "piezo",]
+no_split_test_sets = [ "piezo",]
 
 [cli]
 verbosity = "info"
@@ -58,4 +45,7 @@ show_progress = true
 show_cuda_memory = false
 
 [model]
-grad_layers = ["fc16.weight"]
+layer_dims = [ 2048, 1024, 512,]
+dropout_prop = 0.5
+norm_type = "layer"
+grad_layers = [ "all",]
