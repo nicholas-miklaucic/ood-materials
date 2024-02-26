@@ -1,21 +1,19 @@
 smoke_test = false
-pre_adv_epochs = 4
+pre_adv_epochs = 10
 early_stop = 50
 max_epochs = 500
 network_lr = 1e-4
 network_loss = "smooth_l1"
 rng_seed = 2718
-adv_train_data = "piezo"
 
 [partial]
-epochs_between_regens = 3
-partial_batch = 5
+epochs_between_regens = 10
+partial_batch = 10
 
 [log]
 partial_regens_per_log = 20
 exp_base_dir = "exps"
 log_adv_data = true
-exp_name = "piezo"
 
 [sal]
 target_loss = "smooth_l1"
@@ -23,10 +21,10 @@ xa_grad_reduce = 0.01
 deltaall = 20
 alpha = 0.5
 attack_lr = 3e-4
-attack_epochs = 10
+attack_epochs = 20
 theta_lr = 3e-4
-theta_epochs = 3
-adv_reset_epochs = 20
+theta_epochs = 10
+adv_reset_epochs = 4
 lr_weight_epsilon = 1e-12
 r_theta_splits = 5
 
