@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pyrallis
 import rich.progress as prog
+from sklearn.metrics import log_loss
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -20,6 +21,7 @@ from torch.autograd import grad
 from torch.func import grad_and_value, jacrev, jacfwd, jvp, vjp
 from torch.utils.data import DataLoader, Dataset, Subset
 from utils import debug_shapes, debug_summarize, log_cuda_mem, same_storage, to_np
+from torch_ema import ExponentialMovingAverage
 
 config = pyrallis.parse(MainConfig)
 
@@ -223,7 +225,7 @@ def save_tensor(ori_data, ori_lab, adv_data, adv_lab, epoch, batch_idx):
 
 class IRNet_intorch(torch.nn.Module):
     def __init__(self, input_size, model_conf: ModelConfig):
-        super(IRNet_intorch, self).__init__()        
+        super(IRNet_intorch, self).__init__()
         self.dims = model_conf.layer_dims
 
         self.adapters = []
@@ -231,11 +233,11 @@ class IRNet_intorch(torch.nn.Module):
         i = 0
         prev_dim = input_size
         for dim in self.dims:
-            fc = nn.Linear(prev_dim, dim)            
+            fc = nn.Linear(prev_dim, dim)
             bn = getattr(torch.nn, model_conf.norm_type.value)(dim)
-            #bn = nn.BatchNorm1d(dim)
+            # bn = nn.BatchNorm1d(dim)
             act = nn.ReLU()
-            do=nn.Dropout(p=model_conf.dropout_prop)
+            do = nn.Dropout(p=model_conf.dropout_prop)
             mod = nn.Sequential(fc, bn, do, act)
             self.add_module(f'layer{i}', mod)
             self.layers.append(mod)
@@ -262,7 +264,6 @@ class IRNet_intorch(torch.nn.Module):
             out = layer(out) + out_res
 
         return self.out(out)
-
 
 
 train_best_loss = float('inf')
@@ -618,10 +619,7 @@ class StableAL:
 
 model = IRNet_intorch(train_dataset.dim_x, config.model).to(device)
 optimizer = optim.Adam(model.parameters(), lr=config.network_lr)
-ema_model = torch.optim.swa_utils.AveragedModel(
-    model,
-    multi_avg_fn=torch.optim.swa_utils.get_ema_multi_avg_fn(config.model.ema_decay)
-)
+ema_model = ExponentialMovingAverage(model.parameters(), decay=0.999)
 
 logging.debug(config.model.show_grad_layers(model))
 
@@ -702,6 +700,9 @@ with prog.Progress(
         if epoch >= config.pre_adv_epochs:
             method.epoch_update()
 
+        if epoch >= config.model.ema_start_epoch:
+            ema_model.update()
+
         progress.update(
             partial_losses,
             advance=1,
@@ -757,8 +758,6 @@ with prog.Progress(
             train_loss += loss.item()
         train_loss /= len(train_loader)
 
-        ema_model.update_parameters(model)
-
         progress.update(
             network_losses,
             advance=1,
@@ -812,6 +811,14 @@ with prog.Progress(
             counter += 1
             logging.debug(f'Training Loss has not improved for {counter} epochs.')
 
+        all_loss_dict[epoch + 1] = losses_dict
+
+        mse_losses_df = pd.DataFrame.from_dict(all_loss_dict, orient='index')
+
+        mse_losses_df.reset_index().rename(columns={'index': 'epoch'}).to_feather(
+            exp_dir / 'SAL-training_loss.feather'
+        )
+
         if losses_dict['rsplt_ave'] < Rsplt_ave_best_loss:
             Rsplt_ave_best_loss = losses_dict['rsplt_ave']
             counter_val = 0
@@ -825,16 +832,35 @@ with prog.Progress(
                 )
                 break
 
-        all_loss_dict[epoch + 1] = losses_dict
-
-        mse_losses_df = pd.DataFrame.from_dict(all_loss_dict, orient='index')
-
-        mse_losses_df.reset_index().rename(columns={'index': 'epoch'}).to_feather(
-            exp_dir / 'SAL-training_loss.feather'
-        )
-
-
 torch.save(method.weights, exp_dir / f'Whole_SAL_{epoch}.pt')
 torch.save(model, exp_dir / f'IR3_epoch_{epoch}.pt')
-torch.save(ema_model, exp_dir / 'IR3_EMA.pt')
+
+losses_dict = {'Train': np.nan, 'Partial Train': np.nan}
+with ema_model.average_parameters():
+    for batch_idx, (data, target) in enumerate(train_loader):
+        outputs = method.model(data)
+        loss = config.loss_criterion(outputs, target)
+        train_loss += loss.item()
+    train_loss /= len(train_loader)
+
+    losses_dict = {'Train': train_loss, 'Partial': np.nan}
+
+    for dataset_name in rsplts + list(others):
+        (_dataset, loader) = test_sets[dataset_name]
+        loader_mse_loss = calculate_loss(loader, model, config.loss_criterion)
+        losses_dict[dataset_name] = loader_mse_loss
+
+    if rsplts:
+        losses_dict['rsplt_ave'] = np.average([losses_dict[rsplt] for rsplt in rsplts])
+
+    all_loss_dict[epoch + 2] = losses_dict
+
+    mse_losses_df = pd.DataFrame.from_dict(all_loss_dict, orient='index')
+
+    mse_losses_df.reset_index().rename(columns={'index': 'epoch'}).to_feather(
+        exp_dir / 'SAL-training_loss.feather'
+    )
+
+    torch.save(model, exp_dir / 'IR3_ema.pt')
+
 # torch.cuda.memory._dump_snapshot('snapshot.pickle')

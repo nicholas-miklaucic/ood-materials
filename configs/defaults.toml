@@ -49,3 +49,5 @@ layer_dims = [ 2048, 1024, 512,]
 dropout_prop = 0.5
 norm_type = "layer"
 grad_layers = [ "all",]
+ema_start_epoch = 20
+ema_decay = 0.999

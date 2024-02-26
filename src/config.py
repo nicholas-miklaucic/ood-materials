@@ -22,9 +22,10 @@ class LossFn(Enum):
     huber = 'huber'
     l1 = 'l1'
 
+
 class NormFn(Enum):
     batch = 'BatchNorm1d'
-    layer = 'LayerNorm'    
+    layer = 'LayerNorm'
 
 
 # self.fc128 = nn.Linear(128, 128)
@@ -48,9 +49,7 @@ class ModelConfig:
     """Configuration for model."""
 
     # The dimensions of the layers of the network.
-    layer_dims: list[int] = field(default=[
-        2048, 1024, 512
-    ], is_mutable=True)
+    layer_dims: list[int] = field(default=[2048, 1024, 512], is_mutable=True)
 
     # Dropout amount to use. 0 disables dropout. 1 disables every weight.
     dropout_prop: float = 0.5
@@ -65,6 +64,9 @@ class ModelConfig:
         ],
         is_mutable=True,
     )
+
+    # Number of epochs to wait before starting EMA averaging.
+    ema_start_epoch: int = 20
 
     # EMA decay parameter.
     ema_decay: float = 0.999
@@ -293,6 +295,7 @@ class MainConfig:
             self.partial.epochs_between_regens = 2
             self.data.batch_size = 10
             self.data.dataset_split = 7
+            self.model.ema_start_epoch = 3
 
     def seed_torch_rng(self):
         import torch
