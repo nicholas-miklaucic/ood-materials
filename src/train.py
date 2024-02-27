@@ -160,7 +160,7 @@ for name in config.data.test_sets:
 # data = train_dataset.getSALdata()
 
 
-def sample_and_remove_from_testset(test_dataloader, num_samples=config.data.batch_size):
+def sample_and_remove_from_testset(test_dataloader, num_samples=config.data.num_sal_samples):
     # Step 1: Get the entire test set
     test_dataset = test_dataloader.dataset
 

@@ -157,7 +157,11 @@ class DataConfig:
     target: str = 'delta_e'
 
     # Batch size.
-    batch_size: int = 256
+    batch_size: int = 128
+
+    # Test set sample size. Should be a multiple of batch_size, and controls how many samples are
+    # taken from the test dataset for SAL to use.
+    num_sal_samples: int = 128
 
     # If training using data split from a test set, controls the seed.
     test_split_seed: int = 3141

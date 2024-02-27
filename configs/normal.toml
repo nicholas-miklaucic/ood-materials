@@ -1,13 +1,14 @@
 smoke_test = false
-pre_adv_epochs = 10
-early_stop = 50
+pre_adv_epochs = 5
+early_stop = 30
 max_epochs = 500
 network_lr = 1e-4
 network_loss = "smooth_l1"
 rng_seed = 2718
+adv_train_data = "piezo"
 
 [partial]
-epochs_between_regens = 10
+epochs_between_regens = 5
 partial_batch = 10
 
 [log]
@@ -17,11 +18,11 @@ log_adv_data = true
 
 [sal]
 target_loss = "smooth_l1"
-xa_grad_reduce = 0.01
+xa_grad_reduce = 0.05
 deltaall = 20
 alpha = 0.5
 attack_lr = 3e-4
-attack_epochs = 20
+attack_epochs = 10
 theta_lr = 3e-4
 theta_epochs = 10
 adv_reset_epochs = 4
@@ -33,9 +34,10 @@ col_name = "delta_e"
 
 [data]
 target = "delta_e"
-batch_size = 256
+batch_size = 64
+num_sal_samples = 128
 test_split_seed = 3141
-dataset_split = 2
+dataset_split = 0
 test_sets = [
     "Xshift_tsne",
     "Xshift_umap",
@@ -58,4 +60,4 @@ show_progress = true
 show_cuda_memory = true
 
 [model]
-grad_layers = ["fc128.weight", "fc64.weight", "fc16.weight"]
+grad_layers = ["all"]
