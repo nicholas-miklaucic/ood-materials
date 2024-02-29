@@ -1,11 +1,10 @@
 smoke_test = false
 pre_adv_epochs = 5
-early_stop = 30
+early_stop = 50
 max_epochs = 500
 network_lr = 1e-4
 network_loss = "smooth_l1"
 rng_seed = 2718
-adv_train_data = "piezo"
 
 [partial]
 epochs_between_regens = 5
@@ -13,7 +12,7 @@ partial_batch = 10
 
 [log]
 partial_regens_per_log = 20
-exp_base_dir = "exps"
+exp_base_dir = "exps_baseline"
 log_adv_data = true
 
 [sal]
@@ -34,8 +33,8 @@ col_name = "delta_e"
 
 [data]
 target = "delta_e"
-batch_size = 64
-num_sal_samples = 128
+batch_size = 256
+num_sal_samples = 1024
 test_split_seed = 3141
 dataset_split = 0
 test_sets = [

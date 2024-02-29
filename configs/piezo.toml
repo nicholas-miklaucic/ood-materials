@@ -1,6 +1,6 @@
 smoke_test = false
 pre_adv_epochs = 10
-early_stop = 50
+early_stop = 100
 max_epochs = 500
 network_lr = 1e-4
 network_loss = "smooth_l1"
@@ -35,7 +35,8 @@ col_name = "delta_e"
 
 [data]
 target = "delta_e"
-batch_size = 256
+batch_size = 128
+num_sal_samples = 128
 test_split_seed = 3141
 dataset_split = 0
 test_sets = [

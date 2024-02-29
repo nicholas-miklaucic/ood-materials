@@ -819,7 +819,7 @@ with prog.Progress(
             exp_dir / 'SAL-training_loss.feather'
         )
 
-        if losses_dict['rsplt_ave'] < Rsplt_ave_best_loss:
+        if losses_dict['rsplt_ave'] < Rsplt_ave_best_loss or epoch == config.pre_adv_epochs * 2:
             Rsplt_ave_best_loss = losses_dict['rsplt_ave']
             counter_val = 0
             torch.save(method.model, exp_dir / 'models/IR3_SAL-bset-Rsplt_test_mse_loss.pt')
