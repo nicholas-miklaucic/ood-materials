@@ -4,29 +4,26 @@ import math
 import os
 from datetime import datetime
 from pathlib import Path
-import pprint
-from click import Parameter
 
 import numpy as np
 import pandas as pd
 import pyrallis
 import rich.progress as prog
-from sklearn.metrics import log_loss
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from click import Parameter
 from config import MainConfig, ModelConfig, NormFn, SALConfig
-from einops import einsum, rearrange
+from einops import einsum
 from torch.autograd import grad
-from torch.func import grad_and_value, jacrev, jacfwd, jvp, vjp
+from torch.func import grad_and_value, vjp
 from torch.utils.data import DataLoader, Dataset, Subset
-from utils import debug_shapes, debug_summarize, log_cuda_mem, same_storage, to_np
 from torch_ema import ExponentialMovingAverage
+from utils import debug_summarize, log_cuda_mem, to_np
 
 config = pyrallis.parse(MainConfig)
-
+# config = pyrallis.cfgparsing.load(MainConfig, 'exps/delta_e_piezo/run_params.toml')
 config.cli.set_up_logging()
-
 config.seed_torch_rng()
 
 # torch.cuda.memory._record_memory_history()
@@ -636,151 +633,218 @@ best_loss_dict = {}
 all_loss_dict = {}
 
 
-with prog.Progress(
-    prog.TextColumn('[progress.description]{task.description}'),
-    prog.TextColumn('Loss: {task.fields[annot_val]}'),
-    prog.BarColumn(80, 'light_pink3', 'deep_sky_blue4', 'green'),
-    prog.MofNCompleteColumn(),
-    prog.TimeElapsedColumn(),
-    prog.TimeRemainingColumn(),
-    prog.SpinnerColumn(),
-    refresh_per_second=3,
-    disable=not config.cli.show_progress,
-) as progress:
-    model.train()
-    partial_losses = progress.add_task(
-        '[deep_pink3] Partial [/deep_pink3]',
-        total=config.max_epochs,
-        annot_val=' ',
-    )
-    network_losses = progress.add_task('Training', total=config.max_epochs, annot_val=' ')
-
-    for epoch in range(config.max_epochs):
-        train_loss = 0.0
-
-        partial_train_loss = 0.0
-        total_train_loss = 0.0
-
-        minima = []
-
-        logging.debug(f'[dark_slate_gray3] Epoch {epoch} [/]', extra=dict(markup=True))
-        for batch_idx, (data, target) in enumerate(train_loader):
-            # Zero the gradients
-            optimizer.zero_grad()
-
-            # Forward pass
-            outputs = model(data)
-            loss = config.loss_criterion(outputs, target)
-
-            # Backward pass and optimization
-            loss.backward()
-            optimizer.step()
-            partial_train_loss += loss.cpu().item()
-            if epoch < config.pre_adv_epochs:
-                continue
-
-            if adv_loader is None:
-                adv_data, adv_target = data, target
-            else:
-                adv_data, adv_target = next(iter(adv_loader))
-            method.adv_step_new(adv_data, adv_target, end_flag, epoch, batch_idx)
-
-            if config.cli.show_cuda_memory:
-                logging.debug('Memory after adv_step():')
-                log_cuda_mem()
-
-            # TODO can this if ever actually not be true?
-            if epoch >= config.pre_adv_epochs:
-                if batch_idx == config.partial.partial_batch:  # train partial trainset
-                    break
-            else:
-                raise ValueError('Whoops')
-
-        partial_train_loss /= batch_idx + 1
-        if epoch >= config.pre_adv_epochs:
-            method.epoch_update()
-
-        if epoch >= config.model.ema_start_epoch:
-            ema_model.update()
-
-        progress.update(
-            partial_losses,
-            advance=1,
-            annot_val=f'{partial_train_loss:.4f}',
+if __name__ == '__main__':
+    with prog.Progress(
+        prog.TextColumn('[progress.description]{task.description}'),
+        prog.TextColumn('Loss: {task.fields[annot_val]}'),
+        prog.BarColumn(80, 'light_pink3', 'deep_sky_blue4', 'green'),
+        prog.MofNCompleteColumn(),
+        prog.TimeElapsedColumn(),
+        prog.TimeRemainingColumn(),
+        prog.SpinnerColumn(),
+        refresh_per_second=3,
+        disable=not config.cli.show_progress,
+    ) as progress:
+        model.train()
+        partial_losses = progress.add_task(
+            '[deep_pink3] Partial [/deep_pink3]',
+            total=config.max_epochs,
+            annot_val=' ',
         )
+        network_losses = progress.add_task('Training', total=config.max_epochs, annot_val=' ')
 
-        if epoch % config.partial.epochs_between_regens == 0:
-            with torch.no_grad():
-                logging.debug('sorting training set')
-                # for sorting Training set
-                sort_MAE = []
-                model.eval()
+        for epoch in range(config.max_epochs):
+            train_loss = 0.0
 
-                train_losses = []
-                for i, (x, y) in enumerate(train_loader):
-                    output = model(x)
-                    loss = config.loss_criterion(output, y, reduction='none')
-                    train_losses.append(loss)
+            partial_train_loss = 0.0
+            total_train_loss = 0.0
 
-                    # debug_summarize(loss=loss, output=output, x=x, y=y)
+            minima = []
 
-                    row = pd.DataFrame(to_np(x), columns=input_cols)
-                    row['label'] = to_np(y)
-                    row['yhat'] = to_np(output)
-                    row['loss'] = to_np(loss)
-                    sort_MAE.append(row)
+            logging.debug(f'[dark_slate_gray3] Epoch {epoch} [/]', extra=dict(markup=True))
+            for batch_idx, (data, target) in enumerate(train_loader):
+                # Zero the gradients
+                optimizer.zero_grad()
 
-                train_loss = torch.cat(train_losses).mean().item()
+                # Forward pass
+                outputs = model(data)
+                loss = config.loss_criterion(outputs, target)
 
-                sort_MAE = pd.concat(sort_MAE)
-                if epoch % config.partial_epoch_save == 0:
-                    sort_MAE.to_feather(exp_dir / f'sorted/train_set_sorting_{epoch}.feather')
+                # Backward pass and optimization
+                loss.backward()
+                optimizer.step()
+                partial_train_loss += loss.cpu().item()
+                if epoch < config.pre_adv_epochs:
+                    continue
 
-                new_train = sort_MAE.sort_values(by=['loss'], ascending=False)
-                new_train_dataset = RecurrentDataset(new_train)
-                train_loader = DataLoader(
-                    new_train_dataset,
-                    batch_size=batch_size,
-                    shuffle=False,
-                    drop_last=True,
+                if adv_loader is None:
+                    adv_data, adv_target = data, target
+                else:
+                    adv_data, adv_target = next(iter(adv_loader))
+                method.adv_step_new(adv_data, adv_target, end_flag, epoch, batch_idx)
+
+                if config.cli.show_cuda_memory:
+                    logging.debug('Memory after adv_step():')
+                    log_cuda_mem()
+
+                # TODO can this if ever actually not be true?
+                if epoch >= config.pre_adv_epochs:
+                    if batch_idx == config.partial.partial_batch:  # train partial trainset
+                        break
+                else:
+                    raise ValueError('Whoops')
+
+            partial_train_loss /= batch_idx + 1
+            if epoch >= config.pre_adv_epochs:
+                method.epoch_update()
+
+            if epoch >= config.model.ema_start_epoch:
+                ema_model.update()
+
+            progress.update(
+                partial_losses,
+                advance=1,
+                annot_val=f'{partial_train_loss:.4f}',
+            )
+
+            if epoch % config.partial.epochs_between_regens == 0:
+                with torch.no_grad():
+                    logging.debug('sorting training set')
+                    # for sorting Training set
+                    sort_MAE = []
+                    model.eval()
+
+                    train_losses = []
+                    for i, (x, y) in enumerate(train_loader):
+                        output = model(x)
+                        loss = config.loss_criterion(output, y, reduction='none')
+                        train_losses.append(loss)
+
+                        # debug_summarize(loss=loss, output=output, x=x, y=y)
+
+                        row = pd.DataFrame(to_np(x), columns=input_cols)
+                        row['label'] = to_np(y)
+                        row['yhat'] = to_np(output)
+                        row['loss'] = to_np(loss)
+                        sort_MAE.append(row)
+
+                    train_loss = torch.cat(train_losses).mean().item()
+
+                    sort_MAE = pd.concat(sort_MAE)
+                    if epoch % config.partial_epoch_save == 0:
+                        sort_MAE.to_feather(exp_dir / f'sorted/train_set_sorting_{epoch}.feather')
+
+                    new_train = sort_MAE.sort_values(by=['loss'], ascending=False)
+                    new_train_dataset = RecurrentDataset(new_train)
+                    train_loader = DataLoader(
+                        new_train_dataset,
+                        batch_size=batch_size,
+                        shuffle=False,
+                        drop_last=True,
+                    )
+
+                    logging.debug(
+                        f'Epoch {epoch+1}/{config.max_epochs} - Training loss: {train_loss:.4f} '
+                    )
+                    logging.debug('==' * 20)
+
+            losses_dict = {}
+
+            for batch_idx, (data, target) in enumerate(train_loader):
+                outputs = method.model(data)
+                loss = config.loss_criterion(outputs, target)
+                train_loss += loss.item()
+            train_loss /= len(train_loader)
+
+            progress.update(
+                network_losses,
+                advance=1,
+                annot_val=f'{train_loss:.4f}',
+            )
+
+            losses_dict['Train'] = train_loss
+            losses_dict['Partial_train'] = partial_train_loss
+
+            def calculate_loss(data_loader, model, criterion):
+                mean_loss = 0.0
+                total_batches = len(data_loader)
+
+                for batch_idx, (data, target) in enumerate(data_loader):
+                    outputs = model(data)
+                    loss = criterion(outputs, target)
+                    mean_loss += loss.item()
+
+                mean_loss /= total_batches
+                return mean_loss
+
+            rsplts = [f'Rsplt{i}' for i in range(1, 6) if f'Rsplt{i}' in config.data.test_sets]
+            others = config.data.test_sets
+
+            for dataset_name in rsplts + list(others):
+                (_dataset, loader) = test_sets[dataset_name]
+                loader_mse_loss = calculate_loss(loader, model, config.loss_criterion)
+                losses_dict[dataset_name] = loader_mse_loss
+
+            if rsplts:
+                losses_dict['rsplt_ave'] = np.average([losses_dict[rsplt] for rsplt in rsplts])
+
+            save = []
+            # Separate loop to update the best loss for all datasets
+            for dataset_name, loss in losses_dict.items():
+                if (
+                    dataset_name not in best_loss_dict
+                    or loader_mse_loss < best_loss_dict[dataset_name]
+                ):
+                    best_loss_dict[dataset_name] = loader_mse_loss
+                    save.append(dataset_name)
+
+            # Stop the training process if the training loss has stopped decreasing or has started to increase
+            if train_loss < train_best_loss or epoch == config.pre_adv_epochs * 2:
+                train_best_loss = train_loss
+                counter = 0
+                torch.save(model, exp_dir / f'models/IR3_epoch_{epoch}.pt')
+                torch.save(
+                    method.weights,
+                    exp_dir / f'models/SAL_weight_{epoch}_gamma_{method.attack_gamma}.pt',
                 )
+                save.append('Train')
+            else:
+                counter += 1
+                logging.debug(f'Training Loss has not improved for {counter} epochs.')
 
-                logging.debug(
-                    f'Epoch {epoch+1}/{config.max_epochs} - Training loss: {train_loss:.4f} '
-                )
-                logging.debug('==' * 20)
+            all_loss_dict[epoch + 1] = losses_dict
 
-        losses_dict = {}
+            mse_losses_df = pd.DataFrame.from_dict(all_loss_dict, orient='index')
 
+            mse_losses_df.reset_index().rename(columns={'index': 'epoch'}).to_feather(
+                exp_dir / 'SAL-training_loss.feather'
+            )
+
+            if losses_dict['rsplt_ave'] < Rsplt_ave_best_loss or epoch == config.pre_adv_epochs * 2:
+                Rsplt_ave_best_loss = losses_dict['rsplt_ave']
+                counter_val = 0
+                torch.save(method.model, exp_dir / 'models/IR3_SAL-bset-Rsplt_test_mse_loss.pt')
+                save.append('Rsplt_AVE')
+            else:
+                counter_val += 1
+                if counter_val >= config.early_stop:
+                    logging.info(
+                        f'Training stopped. Valid (rand) Loss has not improved for {config.early_stop} epochs.'
+                    )
+                    break
+
+    torch.save(method.weights, exp_dir / f'Whole_SAL_{epoch}.pt')
+    torch.save(model, exp_dir / f'IR3_epoch_{epoch}.pt')
+
+    losses_dict = {'Train': np.nan, 'Partial Train': np.nan}
+    with ema_model.average_parameters():
         for batch_idx, (data, target) in enumerate(train_loader):
             outputs = method.model(data)
             loss = config.loss_criterion(outputs, target)
             train_loss += loss.item()
         train_loss /= len(train_loader)
 
-        progress.update(
-            network_losses,
-            advance=1,
-            annot_val=f'{train_loss:.4f}',
-        )
-
-        losses_dict['Train'] = train_loss
-        losses_dict['Partial_train'] = partial_train_loss
-
-        def calculate_loss(data_loader, model, criterion):
-            mean_loss = 0.0
-            total_batches = len(data_loader)
-
-            for batch_idx, (data, target) in enumerate(data_loader):
-                outputs = model(data)
-                loss = criterion(outputs, target)
-                mean_loss += loss.item()
-
-            mean_loss /= total_batches
-            return mean_loss
-
-        rsplts = [f'Rsplt{i}' for i in range(1, 6) if f'Rsplt{i}' in config.data.test_sets]
-        others = config.data.test_sets
+        losses_dict = {'Train': train_loss, 'Partial': np.nan}
 
         for dataset_name in rsplts + list(others):
             (_dataset, loader) = test_sets[dataset_name]
@@ -790,28 +854,7 @@ with prog.Progress(
         if rsplts:
             losses_dict['rsplt_ave'] = np.average([losses_dict[rsplt] for rsplt in rsplts])
 
-        save = []
-        # Separate loop to update the best loss for all datasets
-        for dataset_name, loss in losses_dict.items():
-            if dataset_name not in best_loss_dict or loader_mse_loss < best_loss_dict[dataset_name]:
-                best_loss_dict[dataset_name] = loader_mse_loss
-                save.append(dataset_name)
-
-        # Stop the training process if the training loss has stopped decreasing or has started to increase
-        if train_loss < train_best_loss or epoch == config.pre_adv_epochs * 2:
-            train_best_loss = train_loss
-            counter = 0
-            torch.save(model, exp_dir / f'models/IR3_epoch_{epoch}.pt')
-            torch.save(
-                method.weights,
-                exp_dir / f'models/SAL_weight_{epoch}_gamma_{method.attack_gamma}.pt',
-            )
-            save.append('Train')
-        else:
-            counter += 1
-            logging.debug(f'Training Loss has not improved for {counter} epochs.')
-
-        all_loss_dict[epoch + 1] = losses_dict
+        all_loss_dict[epoch + 2] = losses_dict
 
         mse_losses_df = pd.DataFrame.from_dict(all_loss_dict, orient='index')
 
@@ -819,48 +862,6 @@ with prog.Progress(
             exp_dir / 'SAL-training_loss.feather'
         )
 
-        if losses_dict['rsplt_ave'] < Rsplt_ave_best_loss or epoch == config.pre_adv_epochs * 2:
-            Rsplt_ave_best_loss = losses_dict['rsplt_ave']
-            counter_val = 0
-            torch.save(method.model, exp_dir / 'models/IR3_SAL-bset-Rsplt_test_mse_loss.pt')
-            save.append('Rsplt_AVE')
-        else:
-            counter_val += 1
-            if counter_val >= config.early_stop:
-                logging.info(
-                    f'Training stopped. Valid (rand) Loss has not improved for {config.early_stop} epochs.'
-                )
-                break
+        torch.save(model, exp_dir / 'IR3_ema.pt')
 
-torch.save(method.weights, exp_dir / f'Whole_SAL_{epoch}.pt')
-torch.save(model, exp_dir / f'IR3_epoch_{epoch}.pt')
-
-losses_dict = {'Train': np.nan, 'Partial Train': np.nan}
-with ema_model.average_parameters():
-    for batch_idx, (data, target) in enumerate(train_loader):
-        outputs = method.model(data)
-        loss = config.loss_criterion(outputs, target)
-        train_loss += loss.item()
-    train_loss /= len(train_loader)
-
-    losses_dict = {'Train': train_loss, 'Partial': np.nan}
-
-    for dataset_name in rsplts + list(others):
-        (_dataset, loader) = test_sets[dataset_name]
-        loader_mse_loss = calculate_loss(loader, model, config.loss_criterion)
-        losses_dict[dataset_name] = loader_mse_loss
-
-    if rsplts:
-        losses_dict['rsplt_ave'] = np.average([losses_dict[rsplt] for rsplt in rsplts])
-
-    all_loss_dict[epoch + 2] = losses_dict
-
-    mse_losses_df = pd.DataFrame.from_dict(all_loss_dict, orient='index')
-
-    mse_losses_df.reset_index().rename(columns={'index': 'epoch'}).to_feather(
-        exp_dir / 'SAL-training_loss.feather'
-    )
-
-    torch.save(model, exp_dir / 'IR3_ema.pt')
-
-# torch.cuda.memory._dump_snapshot('snapshot.pickle')
+    # torch.cuda.memory._dump_snapshot('snapshot.pickle')

@@ -1,16 +1,15 @@
 import logging
+import typing
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from pprint import pprint
 from typing import Optional
-import typing
-import pandas as pd
 
+import pandas as pd
 import pyrallis
 import torch
 from pyrallis import field
-
 from utils import sizeof_fmt
 
 pyrallis.set_config_type('toml')
