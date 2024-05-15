@@ -257,7 +257,7 @@ class IRNet_intorch(torch.nn.Module):
             if adapter is not None:
                 out_res = adapter(out)
             else:
-                out_res = 0
+                out_res = x
             out = layer(out) + out_res
 
         return self.out(out)
