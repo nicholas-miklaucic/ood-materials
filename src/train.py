@@ -28,7 +28,7 @@ config.seed_torch_rng()
 
 # torch.cuda.memory._record_memory_history()
 
-torch.autograd.set_detect_anomaly(True)
+# torch.autograd.set_detect_anomaly(True)
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
