@@ -1,5 +1,6 @@
 # Data files
 *.csv
+!ablation.csv
 *.feather
 
 # Experiment logs
