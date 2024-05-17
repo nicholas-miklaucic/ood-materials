@@ -6,7 +6,7 @@ from rich.progress import track
 from train import IRNet_intorch, config, model, test_sets, train_dataset
 
 folder = Path.cwd() / config.log.exp_base_dir / f'delta_e_{config.log.exp_name}'
-for ema in (True, False):
+for ema in (True,):
     model = IRNet_intorch(train_dataset.dim_x, config.model)
 
     if ema:
